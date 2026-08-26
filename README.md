@@ -1,5 +1,7 @@
 # PAYPHONE
 
+![PAYPHONE encrypted tunnel overview](assets/24b36d7a-c887-4b15-83f3-42c6abd586b3.png)
+
 PAYPHONE is an experimental encrypted session protocol built on top of QUIC and TLS 1.3. The repository contains a small client/server demo that negotiates a logical session, exchanges application datagrams, performs a keepalive check, and can resume a recently disconnected session.
 
 > [!WARNING]
