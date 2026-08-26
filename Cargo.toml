@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "payphone-core",
+    "payphone-client",
+    "payphone-server",
+    "payphone-transport"]
+
+resolver = "2"
