@@ -16,8 +16,12 @@ use crate::{
 ///
 /// `obfuscation_key` должен быть одинаковым
 /// на клиенте и на сервере — см. `payphone_transport::obfuscation`.
+///
+/// `dev_mode` включает диагностическое логирование в
+/// `ObfuscatedSocket` (см. его документацию).
 pub fn create_client_endpoint(
     obfuscation_key: ObfuscationKey,
+    dev_mode: bool,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
     //
     // Читаем certificate PAYPHONE server.
@@ -66,7 +70,11 @@ pub fn create_client_endpoint(
 
     let async_socket = runtime.wrap_udp_socket(socket)?;
 
-    let obfuscated_socket = Arc::new(ObfuscatedSocket::new(async_socket, obfuscation_key));
+    let obfuscated_socket = Arc::new(ObfuscatedSocket::new(
+        async_socket,
+        obfuscation_key,
+        dev_mode,
+    ));
 
     let mut endpoint = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),

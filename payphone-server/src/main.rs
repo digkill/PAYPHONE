@@ -68,12 +68,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
 
     //
+    // Диагностическое логирование (сырые датаграммы до
+    // деобфускации). Выключено по умолчанию — тишина в ответ
+    // на нераспознанный трафик часть защиты от DPI-пробинга.
+    //
+    let dev_mode = env::var("PAYPHONE_DEV_MODE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    //
     // =========================================================
     // QUIC
     // =========================================================
     //
 
-    let endpoint = create_server_endpoint(address, obfuscation_key)?;
+    let endpoint = create_server_endpoint(address, obfuscation_key, dev_mode)?;
 
     println!("PAYPHONE server: {}", address);
 

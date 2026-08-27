@@ -299,12 +299,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
 
+    let dev_mode = env::var("PAYPHONE_DEV_MODE")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     println!("PAYPHONE VPN client");
 
     //
     // QUIC/TLS.
     //
-    let endpoint = create_client_endpoint(obfuscation_key)?;
+    let endpoint = create_client_endpoint(obfuscation_key, dev_mode)?;
 
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 

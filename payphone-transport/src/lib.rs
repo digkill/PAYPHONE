@@ -30,7 +30,8 @@ mod tests {
 
         let key = ObfuscationKey::from_passphrase("test-obfuscation-passphrase");
 
-        let endpoint = create_server_endpoint(address, key).expect("endpoint creation failed");
+        let endpoint =
+            create_server_endpoint(address, key, true).expect("endpoint creation failed");
 
         let local_address = endpoint
             .local_addr()
@@ -59,8 +60,8 @@ mod tests {
 
         let key = ObfuscationKey::from_passphrase("matching-passphrase");
 
-        let server_endpoint =
-            create_server_endpoint(address, key.clone()).expect("server endpoint creation failed");
+        let server_endpoint = create_server_endpoint(address, key.clone(), true)
+            .expect("server endpoint creation failed");
 
         let server_address = server_endpoint
             .local_addr()
@@ -75,7 +76,8 @@ mod tests {
             incoming.await.expect("server-side handshake failed")
         });
 
-        let client_endpoint = create_client_endpoint(key).expect("client endpoint creation failed");
+        let client_endpoint =
+            create_client_endpoint(key, true).expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
@@ -107,8 +109,8 @@ mod tests {
 
         let client_key = ObfuscationKey::from_passphrase("different-client-passphrase");
 
-        let server_endpoint =
-            create_server_endpoint(address, server_key).expect("server endpoint creation failed");
+        let server_endpoint = create_server_endpoint(address, server_key, true)
+            .expect("server endpoint creation failed");
 
         let server_address = server_endpoint
             .local_addr()
@@ -120,7 +122,7 @@ mod tests {
         let server_task = tokio::spawn(async move { server_endpoint.accept().await });
 
         let client_endpoint =
-            create_client_endpoint(client_key).expect("client endpoint creation failed");
+            create_client_endpoint(client_key, true).expect("client endpoint creation failed");
 
         let client_result = tokio::time::timeout(
             std::time::Duration::from_secs(2),

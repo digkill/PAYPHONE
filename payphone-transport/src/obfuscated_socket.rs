@@ -28,11 +28,24 @@ use crate::obfuscation::ObfuscationKey;
 pub struct ObfuscatedSocket {
     inner: Arc<dyn AsyncUdpSocket>,
     key: ObfuscationKey,
+    dev_mode: bool,
 }
 
 impl ObfuscatedSocket {
-    pub fn new(inner: Arc<dyn AsyncUdpSocket>, key: ObfuscationKey) -> Self {
-        Self { inner, key }
+    //
+    // `dev_mode` включает диагностическое логирование каждой сырой
+    // датаграммы (размер + отправитель) до попытки деобфускации.
+    // По умолчанию (false) сокет остаётся тихим — это часть модели
+    // защиты от DPI-пробинга: сервер не выдаёт вообще никакой
+    // реакции на нераспознанный трафик. Включать только при
+    // диагностике связности (`PAYPHONE_DEV_MODE=true`).
+    //
+    pub fn new(inner: Arc<dyn AsyncUdpSocket>, key: ObfuscationKey, dev_mode: bool) -> Self {
+        Self {
+            inner,
+            key,
+            dev_mode,
+        }
     }
 }
 
@@ -87,19 +100,20 @@ impl AsyncUdpSocket for ObfuscatedSocket {
             let raw_len = meta[0].len;
 
             //
-            // ВРЕМЕННО для диагностики: неудачная деобфускация
-            // (неверный key/passphrase) НЕ отличима здесь от
-            // валидного пакета неправильной длины — deobfuscate()
-            // возвращает None только для данных короче SALT_LEN.
-            // При неверном ключе пакет всё равно дойдёт до quinn
-            // как мусор и будет отброшен уже там, молча. Логируем
-            // сырое поступление, чтобы понять, доходят ли пакеты
-            // клиента до сервера вообще.
+            // Неудачная деобфускация (неверный key/passphrase) НЕ
+            // отличима здесь от валидного пакета неправильной
+            // длины — deobfuscate() возвращает None только для
+            // данных короче SALT_LEN. При неверном ключе пакет
+            // всё равно дойдёт до quinn как мусор и будет отброшен
+            // уже там, молча. В dev_mode логируем сырое поступление,
+            // чтобы понять, доходят ли пакеты клиента до сервера.
             //
-            eprintln!(
-                "PAYPHONE: raw datagram {} bytes from {}",
-                raw_len, meta[0].addr
-            );
+            if self.dev_mode {
+                eprintln!(
+                    "PAYPHONE: raw datagram {} bytes from {}",
+                    raw_len, meta[0].addr
+                );
+            }
 
             match self.key.deobfuscate(&bufs[0][..raw_len]) {
                 Some(plain) => {
