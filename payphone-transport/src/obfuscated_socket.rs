@@ -86,6 +86,21 @@ impl AsyncUdpSocket for ObfuscatedSocket {
             //
             let raw_len = meta[0].len;
 
+            //
+            // ВРЕМЕННО для диагностики: неудачная деобфускация
+            // (неверный key/passphrase) НЕ отличима здесь от
+            // валидного пакета неправильной длины — deobfuscate()
+            // возвращает None только для данных короче SALT_LEN.
+            // При неверном ключе пакет всё равно дойдёт до quinn
+            // как мусор и будет отброшен уже там, молча. Логируем
+            // сырое поступление, чтобы понять, доходят ли пакеты
+            // клиента до сервера вообще.
+            //
+            eprintln!(
+                "PAYPHONE: raw datagram {} bytes from {}",
+                raw_len, meta[0].addr
+            );
+
             match self.key.deobfuscate(&bufs[0][..raw_len]) {
                 Some(plain) => {
                     bufs[0][..plain.len()].copy_from_slice(&plain);
