@@ -1,1 +1,168 @@
-/target
+# ============================================================
+# Rust
+# ============================================================
+
+/target/
+**/target/
+
+
+# ============================================================
+# PAYPHONE secrets / auth
+# ============================================================
+
+# Subscription signing keys (private key + everything else in the dir)
+/auth-keys/*
+**/auth-keys/*
+
+# Public key is not sensitive (verify-only) and is baked into the
+# server image by the Dockerfile, so it's tracked deliberately.
+!/auth-keys/subscription-public.key
+
+# Issued client subscription token
+/subscription.token
+**/subscription.token
+
+# Saved PAYPHONE session / resume state
+/.payphone-session
+**/.payphone-session
+
+
+# ============================================================
+# TLS / QUIC dev certificates
+# ============================================================
+
+/dev-certs/
+**/dev-certs/
+
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.der
+
+
+# ============================================================
+# Environment / configuration secrets
+# ============================================================
+
+.env
+.env.*
+!.env.example
+
+*.secret
+*.secrets
+
+
+# ============================================================
+# Logs / runtime
+# ============================================================
+
+*.log
+
+/logs/
+**/logs/
+
+*.pid
+*.pid.lock
+
+/tmp/
+**/tmp/
+
+.cache/
+**/.cache/
+
+
+# ============================================================
+# macOS
+# ============================================================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.Trashes
+
+
+# ============================================================
+# JetBrains
+# ============================================================
+
+.idea/
+*.iml
+*.iws
+*.ipr
+
+
+# ============================================================
+# VS Code
+# ============================================================
+
+.vscode/
+
+# Если позже захочешь хранить общие настройки проекта,
+# можно убрать .vscode/ и игнорировать только:
+#
+# .vscode/settings.json
+# .vscode/launch.json
+
+
+# ============================================================
+# Vim / Neovim
+# ============================================================
+
+*.swp
+*.swo
+*.swn
+*~
+
+
+# ============================================================
+# Rust Analyzer
+# ============================================================
+
+.rust-analyzer/
+rust-project.json
+
+
+# ============================================================
+# Debug / profiling
+# ============================================================
+
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+flamegraph.svg
+perf.data
+perf.data.old
+
+
+# ============================================================
+# Local binaries / artifacts
+# ============================================================
+
+/dist/
+/build/
+/out/
+
+*.bin
+
+
+# ============================================================
+# Local PAYPHONE runtime state
+# ============================================================
+
+/runtime/
+/state/
+
+payphone.pid
+payphone.sock
+
+.idea

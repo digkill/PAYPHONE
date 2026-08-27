@@ -41,3 +41,4 @@ tokio = {
         "sync"
     ]
 }
+dotenvy = "0.15.7"

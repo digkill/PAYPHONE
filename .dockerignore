@@ -1,0 +1,11 @@
+target
+.git
+.idea
+.DS_Store
+
+# Secrets: never baked into an image layer
+dev-certs
+auth-keys/*
+!auth-keys/subscription-public.key
+subscription.token
+.payphone-session

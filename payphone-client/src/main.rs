@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    env, fs,
+    net::{SocketAddr, ToSocketAddrs},
     path::Path,
     time::Duration,
 };
@@ -251,12 +251,31 @@ async fn create_new_session(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
-    // Пока localhost.
+    // Подхватываем .env, если он есть.
     //
-    // Когда перенесём сервер:
-    // меняешь здесь public IP.
+    // Переменные, уже выставленные в окружении
+    // (например, Docker Compose environment:),
+    // остаются в приоритете.
     //
-    let server_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
+    dotenvy::dotenv().ok();
+
+    //
+    // По умолчанию — localhost, как раньше.
+    //
+    // В Docker Compose PAYPHONE_SERVER_ADDR=payphone-server:40404,
+    // имя сервиса резолвится через Docker DNS.
+    //
+    // TLS-имя (SERVER_NAME) остаётся "localhost",
+    // потому что dev-сертификат всегда выпущен на это имя.
+    //
+    let server_addr_setting =
+        env::var("PAYPHONE_SERVER_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", DEFAULT_PORT));
+
+    let server_address: SocketAddr = server_addr_setting
+        .to_socket_addrs()
+        .map_err(|error| format!("cannot resolve PAYPHONE_SERVER_ADDR {}: {}", server_addr_setting, error))?
+        .next()
+        .ok_or_else(|| format!("PAYPHONE_SERVER_ADDR {} resolved to no address", server_addr_setting))?;
 
     println!("PAYPHONE VPN client");
 

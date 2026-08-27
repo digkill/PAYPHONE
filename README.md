@@ -2,32 +2,144 @@
 
 ![PAYPHONE encrypted tunnel overview](assets/24b36d7a-c887-4b15-83f3-42c6abd586b3.png)
 
-PAYPHONE is an experimental encrypted session protocol built on top of QUIC and TLS 1.3. The repository contains a small client/server demo that negotiates a logical session, exchanges application datagrams, performs a keepalive check, and can resume a recently disconnected session.
+PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from a TUN interface inside QUIC datagrams, protects the transport with TLS 1.3, and authenticates new sessions with Ed25519-signed subscription tokens.
 
 > [!WARNING]
-> PAYPHONE is a development prototype, not a production-ready VPN. The current `DATA` payload contains demo text; TUN integration, packet routing, rekeying, and graceful protocol-level shutdown are not implemented yet.
+> PAYPHONE is a development prototype, not a production-ready VPN. It currently uses localhost-only networking, self-signed development TLS credentials, in-memory session state, and incomplete policy enforcement.
 
-## Features
+## What works
 
-- QUIC datagram transport provided by [Quinn](https://github.com/quinn-rs/quinn)
-- TLS 1.3 with a self-signed development certificate
-- Versioned binary wire format with payload-size validation
+- Bidirectional IPv4 packet transport between TUN interfaces
+- QUIC datagrams with TLS 1.3, powered by [Quinn](https://github.com/quinn-rs/quinn)
+- Compact, versioned binary frames with strict length validation
+- Ed25519-signed subscription tokens with validity periods and plan metadata
+- Server-side checks for signatures, activation time, expiry, signing key, and revocation
 - Capability negotiation during the initial handshake
-- Logical session IDs and assigned private IPv4 addresses
-- Session resumption using a locally stored resume token
-- `DATA` request/response exchange
-- `PING`/`PONG` keepalive exchange
-- Concurrent Tokio-based server
-- Unit tests for frame encoding, messages, sessions, and transport setup
+- Logical sessions with addresses from `10.77.0.0/24`
+- Session resumption after a QUIC reconnect
+- Periodic `PING`/`PONG` keepalives
+- Source-address validation for packets received from clients
+- Concurrent client handling with Tokio
 
-## Workspace layout
+## Workspace
 
 | Crate | Purpose |
 | --- | --- |
-| `payphone-core` | Wire frames, protocol messages, constants, codecs, and validation |
-| `payphone-transport` | QUIC client/server endpoints and development TLS identity management |
-| `payphone-server` | Session management and server-side frame handling |
-| `payphone-client` | Demo client covering handshake, data transfer, keepalive, and session resume |
+| `payphone-core` | Wire frames, protocol messages, codecs, constants, and validation |
+| `payphone-auth` | Subscription claims, Ed25519 signatures, key rings, and token verification |
+| `payphone-token` | CLI for generating signing keys and issuing subscription tokens |
+| `payphone-transport` | QUIC endpoints and development TLS identity management |
+| `payphone-tun` | Async TUN creation and IPv4 header helpers |
+| `payphone-server` | Authentication, session management, TUN routing, and QUIC server |
+| `payphone-client` | Authenticated VPN client, TUN forwarding, keepalive, and resume logic |
+
+## Requirements
+
+- Rust 1.85 or newer (Rust 2024 edition)
+- macOS or Linux with TUN support
+- Permission to create and configure TUN interfaces
+- Local UDP port `40404` available
+
+The current zero-configuration demo is best suited to macOS because the OS assigns separate `utunN` names automatically. On Linux, both binaries request an interface named `payphone0`; running both on one host therefore requires network namespaces or a code/configuration change.
+
+## Quick start
+
+All commands must be run from the repository root. Runtime files are resolved relative to the current working directory.
+
+### 1. Build the workspace
+
+```bash
+cargo build --workspace
+```
+
+### 2. Create a development subscription
+
+Generate an Ed25519 key pair and issue a 30-day Pro token:
+
+```bash
+cargo run -p payphone-token -- setup 30 pro
+```
+
+This creates:
+
+```text
+auth-keys/subscription-private.key  # issuer secret; never give it to clients
+auth-keys/subscription-public.key   # loaded by the server
+subscription.token                 # loaded by the client
+```
+
+### 3. Start the server
+
+TUN creation may require elevated privileges:
+
+```bash
+sudo ./target/debug/payphone-server
+```
+
+The server:
+
+- listens on `127.0.0.1:40404`;
+- creates `dev-certs/payphone-cert.der` and `dev-certs/payphone-key.der` when needed;
+- creates the server TUN interface at `10.77.0.1/24`;
+- loads `auth-keys/subscription-public.key` with key ID `1`.
+
+### 4. Start the client
+
+In another terminal:
+
+```bash
+sudo ./target/debug/payphone-client
+```
+
+The client reads `subscription.token`, authenticates, receives an address beginning with `10.77.0.2`, creates its TUN interface, and starts forwarding packets. From a third terminal, try:
+
+```bash
+ping 10.77.0.1
+```
+
+Press `Ctrl+C` to stop either process.
+
+### 5. Test session resumption
+
+Stop only the client and start it again within 30 seconds while the server remains running:
+
+```bash
+sudo ./target/debug/payphone-client
+```
+
+The client stores a 48-byte session ID/resume-token pair in `.payphone-session`. If the session is still active and the subscription has not expired, the server restores the same logical session and VPN address. A server restart or 30 seconds of inactivity invalidates the saved session.
+
+To force a new authenticated handshake, delete `.payphone-session` before starting the client.
+
+## Subscription token tool
+
+Generate a key pair once:
+
+```bash
+cargo run -p payphone-token -- init
+```
+
+Issue a token using the existing private key:
+
+```bash
+cargo run -p payphone-token -- issue <days> <plan>
+```
+
+Generate missing keys and issue a token in one command:
+
+```bash
+cargo run -p payphone-token -- setup <days> <plan>
+```
+
+Available plans currently encode these claims:
+
+| Plan | Device limit | Maximum Mbps |
+| --- | ---: | ---: |
+| `basic` | 1 | 100 |
+| `pro` | 5 | 500 |
+| `unlimited` | 255 | 0 (unlimited) |
+
+Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. Device and bandwidth limits are recorded but not enforced yet.
 
 ## Protocol overview
 
@@ -41,95 +153,63 @@ Every PAYPHONE message is carried in a QUIC datagram and starts with a 16-byte h
 | Payload length | 4 bytes |
 | Sequence number | 8 bytes |
 
-Protocol version 1 defines these frame types:
+Multi-byte integers use network byte order. Protocol version 1 supports these frame types:
 
-| Value | Frame | Direction | Status |
+| Value | Frame | Direction | Purpose |
 | ---: | --- | --- | --- |
-| 1 | `Data` | Both | Implemented |
-| 2 | `WhatsUpDude` | Client to server | Implemented |
-| 3 | `AllGoodDude` | Server to client | Implemented |
-| 4 | `Ping` | Client to server | Implemented |
-| 5 | `Pong` | Server to client | Implemented |
-| 6 | `Rekey` | Both | Reserved |
-| 7 | `Close` | Both | Reserved |
-| 8 | `BackAgainDude` | Client to server | Implemented |
-| 9 | `StillGoodDude` | Server to client | Implemented |
+| 1 | `Data` | Both | Carries a session ID, packet ID, and IP packet |
+| 2 | `WhatsUpDude` | Client to server | Starts a session and includes the subscription token |
+| 3 | `AllGoodDude` | Server to client | Accepts a session and assigns its address and resume secret |
+| 4 | `Ping` | Client to server | Keepalive request |
+| 5 | `Pong` | Server to client | Keepalive response |
+| 6 | `Rekey` | Both | Reserved; not implemented |
+| 7 | `Close` | Both | Reserved; not implemented |
+| 8 | `BackAgainDude` | Client to server | Requests session resumption |
+| 9 | `StillGoodDude` | Server to client | Confirms session resumption |
+| 10 | `AccessDeniedDude` | Server to client | Reports token or subscription rejection |
 
-The maximum frame payload is 64 KiB. Multi-byte integers are encoded in network byte order.
+The maximum frame payload and maximum `DATA` payload are both 64 KiB. A handshake authentication token may be at most 2 KiB.
 
-### Session flow
+### Data path
 
 ```text
-Client                                  Server
-  |                                       |
-  |---- WhatsUpDude --------------------->|  create session
-  |<--- AllGoodDude ----------------------|  session ID, IPv4, token
-  |                                       |
-  |---- Data ---------------------------->|
-  |<--- Data -----------------------------|
-  |                                       |
-  |---- Ping ---------------------------->|
-  |<--- Pong -----------------------------|
-  |                                       |
-  |---- BackAgainDude ------------------->|  reconnect with saved token
-  |<--- StillGoodDude --------------------|  resume the same session
+Application / kernel
+        |
+        v
+   Client TUN  ->  DATA frame  ->  QUIC + TLS 1.3  ->  Server TUN
+   Client TUN  <-  DATA frame  <-  QUIC + TLS 1.3  <-  Server TUN
 ```
 
-## Requirements
-
-- Rust 1.85 or newer (the workspace uses the Rust 2024 edition)
-- A platform that supports UDP sockets
-
-Install Rust with [rustup](https://rustup.rs/) if it is not already available.
-
-## Quick start
-
-Run all commands from the repository root because the development certificate and session files use paths relative to the current directory.
-
-1. Start the server:
-
-   ```bash
-   cargo run -p payphone-server
-   ```
-
-   The server listens on `127.0.0.1:40404`. If necessary, it creates the development identity in `dev-certs/`.
-
-2. In another terminal, run the client:
-
-   ```bash
-   cargo run -p payphone-client
-   ```
-
-   The client connects over QUIC/TLS, creates or resumes a session, exchanges one demo `DATA` message, verifies the connection with `PING`/`PONG`, and exits.
-
-3. Run the client again within 30 seconds to see session resumption:
-
-   ```bash
-   cargo run -p payphone-client
-   ```
-
-The client stores its session ID and resume token in `.payphone-session`. Sessions exist only in server memory and expire after 30 seconds without valid `DATA` or `PING` traffic. Restarting the server also invalidates all sessions.
-
-To force a fresh handshake, remove `.payphone-session` before starting the client.
+The server maps destination VPN addresses to active sessions. Client-originated IPv4 packets are accepted only when their source address matches the address assigned to that session.
 
 ## Testing
 
-Run the complete test suite with:
+Run the complete suite with:
 
 ```bash
 cargo test --workspace
 ```
 
-The transport tests open a local UDP socket, so they must run in an environment that permits local network binding.
+The workspace currently contains 35 passing unit tests covering frames, protocol messages, subscription authentication, session helpers, IPv4 parsing, TLS identity creation, and QUIC endpoint binding. The endpoint test must be allowed to open a local UDP socket.
 
-## Development notes
+Formatting can be checked with:
 
-- The server currently supports IPv4, DNS, and session-resume capabilities. The client advertises IPv4, IPv6, DNS, resume, and roaming; the handshake keeps only the capabilities supported by both sides.
-- New sessions receive addresses from the development range `10.77.0.0/24`, starting at `10.77.0.2`.
-- The negotiated demo MTU is 1280 bytes.
-- The server binds only to localhost. Change the bind address deliberately before testing across machines.
-- `Rekey` and protocol-level `Close` frames are defined but not implemented.
+```bash
+cargo fmt --all -- --check
+```
+
+## Current limitations
+
+- Client and server addresses are hard-coded to localhost.
+- Only IPv4 packets are routed; IPv6 and roaming are advertised by the client but not negotiated by the server.
+- The DNS capability bit is negotiated, but DNS configuration is not implemented.
+- Internet forwarding, routing rules, and NAT are not configured automatically.
+- `Rekey` and protocol-level `Close` are defined but not implemented.
+- Sessions and token revocations are stored only in memory.
+- Session sequence numbers are recorded but not currently enforced as an anti-replay mechanism.
+- Subscription device and bandwidth limits are not enforced.
+- There is no production configuration or command-line interface for addresses, ports, paths, or trusted keys.
 
 ## Security notice
 
-The files in `dev-certs/` are development credentials. The private key is included in the repository, and the client stores its resume token as unencrypted local bytes. Do not reuse these credentials or this storage approach in production.
+The generated TLS certificate is self-signed. The client trusts the certificate file directly, the resume token is stored unencrypted in `.payphone-session`, and the development key paths are local files. Keep `auth-keys/subscription-private.key` secret, do not distribute it with the server or client, and do not use the current credential handling unchanged in production.

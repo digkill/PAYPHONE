@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    env, fs,
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -32,7 +32,27 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
+    //
+    // Подхватываем .env, если он есть.
+    //
+    // Переменные, уже выставленные в окружении
+    // (например, Docker Compose environment:),
+    // остаются в приоритете.
+    //
+    dotenvy::dotenv().ok();
+
+    //
+    // По умолчанию — localhost, как раньше.
+    //
+    // В Docker Compose PAYPHONE_BIND_ADDR=0.0.0.0:40404,
+    // чтобы принимать соединения из других контейнеров.
+    //
+    let bind_addr =
+        env::var("PAYPHONE_BIND_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", DEFAULT_PORT));
+
+    let address: SocketAddr = bind_addr
+        .parse()
+        .map_err(|error| format!("invalid PAYPHONE_BIND_ADDR {}: {}", bind_addr, error))?;
 
     //
     // =========================================================

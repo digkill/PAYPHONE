@@ -1,0 +1,66 @@
+services:
+  payphone-server:
+    build:
+      context: .
+      target: server
+    image: payphone-server:latest
+    container_name: payphone-server
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Wins over .env so the container always binds correctly
+      # regardless of what PAYPHONE_BIND_ADDR is set to locally.
+      PAYPHONE_BIND_ADDR: "0.0.0.0:40404"
+    ports:
+      - "40404:40404/udp"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      # Cert/key are generated on first start if missing, then
+      # shared with the client so it can pin the same cert.
+      - ./dev-certs:/app/dev-certs
+      # Only the public key ever enters a container; the
+      # private signing key stays on the host issuer machine.
+      - ./auth-keys/subscription-public.key:/app/auth-keys/subscription-public.key:ro
+    restart: unless-stopped
+
+  payphone-client:
+    build:
+      context: .
+      target: client
+    image: payphone-client:latest
+    container_name: payphone-client
+    depends_on:
+      - payphone-server
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Wins over .env. Resolved via Docker Compose's DNS; TLS still
+      # validates against "localhost" because that's what the dev cert is issued for.
+      PAYPHONE_SERVER_ADDR: "payphone-server:40404"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./dev-certs:/app/dev-certs:ro
+      - ./subscription.token:/app/subscription.token:ro
+      - ./.payphone-session:/app/.payphone-session
+    restart: unless-stopped
+
+  # One-off helper for (re)issuing signing keys / subscription tokens:
+  #   docker compose run --rm payphone-token setup 30 pro
+  payphone-token:
+    build:
+      context: .
+      target: token
+    image: payphone-token:latest
+    profiles:
+      - tools
+    volumes:
+      - ./auth-keys:/app/auth-keys
+      - ./subscription.token:/app/subscription.token

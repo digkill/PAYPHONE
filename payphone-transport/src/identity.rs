@@ -1,6 +1,21 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
+
+//
+// Защищает создание cert/key
+// от гонки между потоками одного процесса
+// (например, параллельные тесты).
+//
+fn generation_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// DEV certificate.
 ///
@@ -24,6 +39,17 @@ pub const SERVER_NAME: &str = "localhost";
 /// ├── payphone-cert.der
 /// └── payphone-key.der
 pub fn ensure_dev_identity() -> Result<(), Box<dyn std::error::Error>> {
+    //
+    // Только один вызывающий за раз
+    // может проверять/генерировать identity.
+    //
+    // Без этого два потока, увидев отсутствие
+    // файлов одновременно, могут писать
+    // в cert/key файл параллельно и
+    // повредить его содержимое.
+    //
+    let _guard = generation_lock().lock().unwrap_or_else(|poison| poison.into_inner());
+
     //
     // Если оба файла уже существуют,
     // ничего генерировать не нужно.
