@@ -1,0 +1,12 @@
+[package]
+name = "payphone-tun"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tun-rs = {
+    version = "2.8.8",
+    features = [
+        "async"
+    ]
+}

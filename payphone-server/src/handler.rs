@@ -1,12 +1,19 @@
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use quinn::Connection;
 
 use tokio::sync::RwLock;
 
+use payphone_auth::{AuthError, MemoryRevocationStore, SubscriptionToken, SubscriptionVerifier};
+
 use payphone_core::{
     Frame, FrameType, PROTOCOL_VERSION,
+    access_denied_dude::{AccessDeniedDude, DenyReason},
     back_again_dude::BackAgainDude,
     data::Data,
     ping::Ping,
@@ -14,122 +21,77 @@ use payphone_core::{
     whats_up_dude::{CAP_DNS, CAP_IPV4, CAP_RESUME, WhatsUpDude},
 };
 
+use payphone_tun::{PAYPHONE_MTU, SharedTun, ipv4_source};
+
 use crate::session::SessionManager;
 
-//
-// Возможности PAYPHONE server.
-//
 const SERVER_CAPABILITIES: u32 = CAP_IPV4 | CAP_DNS | CAP_RESUME;
 
-//
-// MTU виртуального PAYPHONE tunnel.
-//
-const PAYPHONE_MTU: u16 = 1280;
+pub type PayphoneVerifier = SubscriptionVerifier<MemoryRevocationStore>;
 
-/// Обрабатывает один PAYPHONE Frame,
-/// пришедший внутри QUIC DATAGRAM.
 pub async fn handle_packet(
     connection: Connection,
 
     sessions: Arc<RwLock<SessionManager>>,
 
+    verifier: Arc<PayphoneVerifier>,
+
+    tun: SharedTun,
+
     client_address: SocketAddr,
 
     packet: Bytes,
 ) {
-    //
-    // QUIC уже:
-    //
-    // получил UDP
-    // обработал QUIC
-    // расшифровал TLS 1.3
-    //
-    // Здесь уже лежат обычные
-    // PAYPHONE bytes.
-    //
     let frame = match Frame::decode(packet) {
         Ok(frame) => frame,
 
         Err(error) => {
-            println!("Invalid PAYPHONE frame from {}: {}", client_address, error);
+            eprintln!("Invalid PAYPHONE frame: {}", error);
 
             return;
         }
     };
 
-    println!();
-    println!("PAYPHONE frame from {}", client_address);
-
-    println!("  type: {:?}", frame.frame_type);
-
-    println!("  sequence: {}", frame.sequence);
-
     match frame.frame_type {
-        //
-        // Новый handshake.
-        //
         FrameType::WhatsUpDude => {
-            handle_whats_up_dude(connection, sessions, client_address, frame).await;
+            handle_whats_up_dude(connection, sessions, verifier, client_address, frame).await;
         }
 
-        //
-        // Resume старой Session.
-        //
         FrameType::BackAgainDude => {
             handle_back_again_dude(connection, sessions, client_address, frame).await;
         }
 
-        //
-        // Пользовательские данные.
-        //
         FrameType::Data => {
-            handle_data(connection, sessions, client_address, frame).await;
+            handle_data(sessions, tun, client_address, frame).await;
         }
 
-        //
-        // Keepalive.
-        //
         FrameType::Ping => {
             handle_ping(connection, sessions, client_address, frame).await;
         }
 
-        //
-        // Клиент не должен слать PONG
-        // в текущей модели.
-        //
-        FrameType::Pong => {
-            println!("Unexpected PONG from client");
-        }
-
-        //
-        // Это серверные ответы.
-        //
-        FrameType::AllGoodDude => {
-            println!("Unexpected AllGoodDude from client");
-        }
-
-        FrameType::StillGoodDude => {
-            println!("Unexpected StillGoodDude from client");
-        }
+        FrameType::Pong
+        | FrameType::AllGoodDude
+        | FrameType::StillGoodDude
+        | FrameType::AccessDeniedDude => {}
 
         FrameType::Rekey => {
-            println!("REKEY not implemented yet");
+            println!("REKEY not implemented");
         }
 
-        FrameType::Close => {
-            println!("CLOSE not implemented yet");
-        }
+        FrameType::Close => {}
     }
 }
 
 // =============================================================
-// WhatsUpDude
+// HANDSHAKE
 // =============================================================
 
 async fn handle_whats_up_dude(
     connection: Connection,
 
     sessions: Arc<RwLock<SessionManager>>,
+
+    verifier: Arc<PayphoneVerifier>,
 
     client_address: SocketAddr,
 
@@ -138,48 +100,54 @@ async fn handle_whats_up_dude(
     let sequence = frame.sequence;
 
     let whats_up = match WhatsUpDude::decode(frame.payload) {
-        Ok(message) => message,
+        Ok(value) => value,
 
         Err(error) => {
-            println!("Invalid WhatsUpDude: {}", error);
+            eprintln!("Invalid WhatsUpDude: {}", error);
 
             return;
         }
     };
 
-    println!("What's up, dude?");
+    let token = match SubscriptionToken::decode(whats_up.auth_token) {
+        Ok(token) => token,
 
-    println!("  client version: {}", whats_up.client_version);
+        Err(_) => {
+            send_access_denied(&connection, sequence, DenyReason::InvalidToken, 0).await;
 
-    println!("  client capabilities: {}", whats_up.capabilities);
+            return;
+        }
+    };
 
-    //
-    // Оставляем только возможности,
-    // которые поддерживают обе стороны.
-    //
-    let negotiated_capabilities = whats_up.capabilities & SERVER_CAPABILITIES;
+    let claims = match verifier.verify(&token) {
+        Ok(claims) => claims,
 
-    //
-    // Создание Session изменяет
-    // SessionManager.
-    //
-    // Поэтому нужен write lock.
-    //
+        Err(error) => {
+            let (reason, expires_at) = auth_error_to_deny(&error, token.claims.expires_at);
+
+            send_access_denied(&connection, sequence, reason, expires_at).await;
+
+            return;
+        }
+    };
+
+    println!("Subscription accepted: {:?}", claims.plan);
+
+    let capabilities = whats_up.capabilities & SERVER_CAPABILITIES;
+
     let all_good = {
-        let mut sessions = sessions.write().await;
+        let mut manager = sessions.write().await;
 
-        sessions.create_session(
+        manager.create_session(
             client_address,
-            negotiated_capabilities,
+            connection.clone(),
+            capabilities,
             whats_up.client_nonce,
             sequence,
             PAYPHONE_MTU,
+            &claims,
         )
     };
-
-    //
-    // Lock здесь уже отпущен.
-    //
 
     let response = Frame {
         version: PROTOCOL_VERSION,
@@ -193,40 +161,19 @@ async fn handle_whats_up_dude(
         payload: all_good.encode(),
     };
 
-    //
-    // PAYPHONE Frame
-    //
-    // ->
-    //
-    // QUIC DATAGRAM.
-    //
-    if let Err(error) = connection.send_datagram_wait(response.encode()).await {
-        println!("AllGoodDude send error: {}", error);
-
-        return;
-    }
-
-    print!("Created Session ID: ");
-
-    for byte in all_good.session_id {
-        print!("{:02x}", byte);
-    }
-
-    println!();
+    let _ = connection.send_datagram_wait(response.encode()).await;
 
     println!(
-        "Assigned IPv4: {}.{}.{}.{}",
+        "Session {}.{}.{}.{} created",
         all_good.assigned_ipv4[0],
         all_good.assigned_ipv4[1],
         all_good.assigned_ipv4[2],
         all_good.assigned_ipv4[3],
     );
-
-    println!("All good, dude.");
 }
 
 // =============================================================
-// BackAgainDude
+// RESUME
 // =============================================================
 
 async fn handle_back_again_dude(
@@ -240,56 +187,48 @@ async fn handle_back_again_dude(
 ) {
     let sequence = frame.sequence;
 
-    let back_again = match BackAgainDude::decode(frame.payload) {
+    let message = match BackAgainDude::decode(frame.payload) {
         Ok(message) => message,
 
-        Err(error) => {
-            println!("Invalid BackAgainDude: {}", error);
+        Err(_) => return,
+    };
 
-            return;
+    //
+    // Проверяем срок подписки
+    // ПЕРЕД resume.
+    //
+    let expired = {
+        let manager = sessions.read().await;
+
+        match manager.get(&message.session_id) {
+            Some(session) => unix_time() >= session.subscription_expires_at,
+
+            None => false,
         }
     };
 
-    println!("Back again, dude?");
+    if expired {
+        send_access_denied(&connection, sequence, DenyReason::SubscriptionExpired, 0).await;
 
-    //
-    // Resume изменяет:
-    //
-    // client_address
-    // last_sequence
-    // last_activity
-    //
-    let still_good = {
-        let mut sessions = sessions.write().await;
+        return;
+    }
 
-        sessions.resume_session(
-            &back_again.session_id,
-            &back_again.resume_token,
+    let resumed = {
+        let mut manager = sessions.write().await;
+
+        manager.resume_session(
+            &message.session_id,
+            &message.resume_token,
             client_address,
+            connection.clone(),
             sequence,
             PAYPHONE_MTU,
         )
     };
 
-    let still_good = match still_good {
-        Some(session) => session,
-
-        None => {
-            println!("Session resume rejected");
-
-            return;
-        }
+    let Some(still_good) = resumed else {
+        return;
     };
-
-    println!("Session resumed");
-
-    println!(
-        "  IPv4: {}.{}.{}.{}",
-        still_good.assigned_ipv4[0],
-        still_good.assigned_ipv4[1],
-        still_good.assigned_ipv4[2],
-        still_good.assigned_ipv4[3],
-    );
 
     let response = Frame {
         version: PROTOCOL_VERSION,
@@ -303,122 +242,82 @@ async fn handle_back_again_dude(
         payload: still_good.encode(),
     };
 
-    if let Err(error) = connection.send_datagram_wait(response.encode()).await {
-        println!("StillGoodDude send error: {}", error);
-
-        return;
-    }
-
-    println!("Still good, dude.");
+    let _ = connection.send_datagram_wait(response.encode()).await;
 }
 
 // =============================================================
-// DATA
+// DATA -> TUN
 // =============================================================
 
 async fn handle_data(
-    connection: Connection,
-
     sessions: Arc<RwLock<SessionManager>>,
+
+    tun: SharedTun,
 
     client_address: SocketAddr,
 
     frame: Frame,
 ) {
-    let frame_sequence = frame.sequence;
+    let sequence = frame.sequence;
 
     let data = match Data::decode(frame.payload) {
         Ok(data) => data,
 
         Err(error) => {
-            println!("Invalid DATA: {}", error);
+            eprintln!("Invalid DATA: {}", error);
 
             return;
         }
     };
 
-    //
-    // Обновляем Session.
-    //
-    {
-        let mut sessions = sessions.write().await;
+    let allowed = {
+        let mut manager = sessions.write().await;
 
-        let session = match sessions.get_mut(&data.session_id) {
-            Some(session) => session,
+        let Some(session) = manager.get_mut(&data.session_id) else {
+            return;
+        };
 
-            None => {
-                println!("Unknown DATA Session");
+        if session.client_address != client_address {
+            return;
+        }
+
+        if unix_time() >= session.subscription_expires_at {
+            return;
+        }
+
+        //
+        // Защита:
+        //
+        // клиент с VPN IP 10.77.0.2
+        // не должен подсовывать packet
+        // с source 10.77.0.55.
+        //
+        if let Some(source) = ipv4_source(&data.payload) {
+            if source != session.ipv4 {
+                eprintln!("Spoofed VPN source address");
 
                 return;
             }
-        };
-
-        //
-        // Resume уже умеет менять endpoint.
-        //
-        // После успешного Resume здесь
-        // должен быть текущий QUIC peer.
-        //
-        if session.client_address != client_address {
-            println!("DATA client address mismatch");
-
-            return;
         }
 
         session.last_activity = Instant::now();
 
-        session.last_sequence = frame_sequence;
+        session.last_sequence = sequence;
 
-        println!(
-            "DATA from {}.{}.{}.{}",
-            session.ipv4[0], session.ipv4[1], session.ipv4[2], session.ipv4[3],
-        );
-    }
-
-    //
-    // Write lock уже отпущен.
-    //
-
-    println!("DATA packet ID: {}", data.packet_id);
-
-    //
-    // Сейчас payload тестовый текст.
-    //
-    // На этапе TUN здесь будут
-    // бинарные IPv4/IPv6 packets.
-    //
-    let text = String::from_utf8_lossy(&data.payload);
-
-    println!("Payload: {}", text);
-
-    //
-    // Тестовый ответ сервера.
-    //
-    let response_data = Data::new(
-        data.session_id,
-        1,
-        Bytes::from_static(b"Loud and clear, dude."),
-    );
-
-    let response_frame = Frame {
-        version: PROTOCOL_VERSION,
-
-        frame_type: FrameType::Data,
-
-        flags: 0,
-
-        sequence: frame_sequence + 1,
-
-        payload: response_data.encode(),
+        true
     };
 
-    if let Err(error) = connection.send_datagram_wait(response_frame.encode()).await {
-        println!("DATA response error: {}", error);
-
+    if !allowed {
         return;
     }
 
-    println!("DATA response sent");
+    //
+    // Настоящий IP packet
+    // инжектируется в Linux kernel.
+    //
+    if let Err(error) = tun.send(&data.payload).await {
+        eprintln!("TUN write error: {}", error);
+    }
 }
 
 // =============================================================
@@ -434,68 +333,96 @@ async fn handle_ping(
 
     frame: Frame,
 ) {
-    let frame_sequence = frame.sequence;
+    let sequence = frame.sequence;
 
     let ping = match Ping::decode(frame.payload) {
         Ok(ping) => ping,
 
-        Err(error) => {
-            println!("Invalid PING: {}", error);
-
-            return;
-        }
+        Err(_) => return,
     };
 
     {
-        let mut sessions = sessions.write().await;
+        let mut manager = sessions.write().await;
 
-        let session = match sessions.get_mut(&ping.session_id) {
-            Some(session) => session,
-
-            None => {
-                println!("PING for unknown Session");
-
-                return;
-            }
+        let Some(session) = manager.get_mut(&ping.session_id) else {
+            return;
         };
 
         if session.client_address != client_address {
-            println!("PING client address mismatch");
-
             return;
         }
 
         session.last_activity = Instant::now();
 
-        session.last_sequence = frame_sequence;
+        session.last_sequence = sequence;
     }
 
-    println!("PING received");
-
-    println!("  ping ID: {}", ping.ping_id);
-
-    //
-    // Ответ имеет тот же ping_id.
-    //
     let pong = Pong::new(ping.session_id, ping.ping_id);
 
-    let pong_frame = Frame {
+    let frame = Frame {
         version: PROTOCOL_VERSION,
 
         frame_type: FrameType::Pong,
 
         flags: 0,
 
-        sequence: frame_sequence + 1,
+        sequence: sequence + 1,
 
         payload: pong.encode(),
     };
 
-    if let Err(error) = connection.send_datagram_wait(pong_frame.encode()).await {
-        println!("PONG send error: {}", error);
+    let _ = connection.send_datagram_wait(frame.encode()).await;
+}
 
-        return;
+// =============================================================
+// DENIED
+// =============================================================
+
+async fn send_access_denied(
+    connection: &Connection,
+
+    sequence: u64,
+
+    reason: DenyReason,
+
+    expires_at: u64,
+) {
+    let denied = AccessDeniedDude::new(reason, expires_at);
+
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+
+        frame_type: FrameType::AccessDeniedDude,
+
+        flags: 0,
+
+        sequence: sequence + 1,
+
+        payload: denied.encode(),
+    };
+
+    let _ = connection.send_datagram_wait(frame.encode()).await;
+}
+
+fn auth_error_to_deny(error: &AuthError, expires_at: u64) -> (DenyReason, u64) {
+    match error {
+        AuthError::Expired => (DenyReason::SubscriptionExpired, expires_at),
+
+        AuthError::Revoked => (DenyReason::TokenRevoked, 0),
+
+        AuthError::NotYetValid => (DenyReason::SubscriptionNotActive, 0),
+
+        AuthError::UnknownKeyId(_) => (DenyReason::UnknownSigningKey, 0),
+
+        AuthError::UnknownPlan(_) => (DenyReason::UnsupportedPlan, 0),
+
+        _ => (DenyReason::InvalidToken, 0),
     }
+}
 
-    println!("PONG sent");
+fn unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

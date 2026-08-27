@@ -6,13 +6,13 @@ use std::{
 };
 
 use bytes::Bytes;
-
 use quinn::Connection;
 
-use tokio::time;
+use tokio::{signal, time};
 
 use payphone_core::{
     DEFAULT_PORT, Frame, FrameType, PROTOCOL_VERSION,
+    access_denied_dude::AccessDeniedDude,
     all_good_dude::{AllGoodDude, SERVER_NONCE_SIZE, SESSION_ID_SIZE},
     back_again_dude::BackAgainDude,
     data::Data,
@@ -24,68 +24,35 @@ use payphone_core::{
 
 use payphone_transport::{client::create_client_endpoint, identity::SERVER_NAME};
 
-//
-// Версия PAYPHONE client application.
-//
-// Это НЕ версия wire protocol.
-//
+use payphone_tun::{PAYPHONE_MTU, create_client_tun};
+
+// =============================================================
+// CONFIG
+// =============================================================
+
 const CLIENT_VERSION: u16 = 1;
 
-//
-// Возможности клиента.
-//
 const CLIENT_CAPABILITIES: u32 = CAP_IPV4 | CAP_IPV6 | CAP_DNS | CAP_RESUME | CAP_ROAMING;
 
-//
-// Максимальное время ожидания
-// ответа сервера.
-//
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-//
-// Здесь временно сохраняем:
-//
-// Session ID
-// +
-// Resume Token
-//
-// Позже сделаем нормальный
-// persistent client state.
-//
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
 const SESSION_FILE: &str = ".payphone-session";
 
-//
-// Сохранённая информация,
-// необходимая для Session Resume.
-//
+const SUBSCRIPTION_FILE: &str = "subscription.token";
+
+// =============================================================
+// SAVED / ACTIVE SESSION
+// =============================================================
+
 struct SavedSession {
-    //
-    // Какая Session.
-    //
     session_id: [u8; SESSION_ID_SIZE],
 
-    //
-    // Секрет для подтверждения,
-    // что Session действительно наша.
-    //
     resume_token: [u8; SERVER_NONCE_SIZE],
 }
 
-//
-// Унифицированное состояние
-// активной PAYPHONE Session.
-//
-// Неважно:
-//
-// Session только что создана
-//
-// или
-//
-// Session была восстановлена.
-//
-// Дальше DATA/PING используют
-// одинаковую структуру.
-//
+#[derive(Clone)]
 struct ActiveSession {
     session_id: [u8; SESSION_ID_SIZE],
 
@@ -97,7 +64,7 @@ struct ActiveSession {
 }
 
 // =============================================================
-// SAVE SESSION
+// SESSION FILE
 // =============================================================
 
 fn save_session(
@@ -105,11 +72,6 @@ fn save_session(
 
     resume_token: [u8; SERVER_NONCE_SIZE],
 ) -> std::io::Result<()> {
-    //
-    // Размер:
-    //
-    // 16 + 32 = 48 bytes.
-    //
     let mut data = Vec::with_capacity(SESSION_ID_SIZE + SERVER_NONCE_SIZE);
 
     data.extend_from_slice(&session_id);
@@ -119,51 +81,19 @@ fn save_session(
     fs::write(SESSION_FILE, data)
 }
 
-// =============================================================
-// LOAD SESSION
-// =============================================================
-
 fn load_session() -> Option<SavedSession> {
-    //
-    // fs::read возвращает:
-    //
-    // Result<Vec<u8>, io::Error>
-    //
-    // .ok()
-    //
-    // превращает:
-    //
-    // Ok(data) -> Some(data)
-    //
-    // Err      -> None
-    //
-    // ?
-    //
-    // если None,
-    // сразу возвращает None.
-    //
     let data = fs::read(SESSION_FILE).ok()?;
 
-    //
-    // Файл обязан быть
-    // ровно 48 bytes.
-    //
     if data.len() != SESSION_ID_SIZE + SERVER_NONCE_SIZE {
         return None;
     }
 
     let mut session_id = [0u8; SESSION_ID_SIZE];
 
-    //
-    // Первые 16 bytes.
-    //
     session_id.copy_from_slice(&data[..SESSION_ID_SIZE]);
 
     let mut resume_token = [0u8; SERVER_NONCE_SIZE];
 
-    //
-    // Остальные 32 bytes.
-    //
     resume_token.copy_from_slice(&data[SESSION_ID_SIZE..]);
 
     Some(SavedSession {
@@ -173,33 +103,17 @@ fn load_session() -> Option<SavedSession> {
 }
 
 // =============================================================
-// RECEIVE QUIC DATAGRAM WITH TIMEOUT
+// RECEIVE ONE FRAME
 // =============================================================
 
 async fn receive_frame(connection: &Connection) -> Result<Frame, Box<dyn std::error::Error>> {
-    //
-    // Ждём QUIC datagram,
-    // но максимум RESPONSE_TIMEOUT.
-    //
     let bytes = time::timeout(RESPONSE_TIMEOUT, connection.read_datagram()).await??;
 
-    //
-    // QUIC уже:
-    //
-    // принял UDP
-    // расшифровал TLS
-    // обработал QUIC
-    //
-    // Теперь у нас обычные
-    // PAYPHONE bytes.
-    //
-    let frame = Frame::decode(bytes)?;
-
-    Ok(frame)
+    Ok(Frame::decode(bytes)?)
 }
 
 // =============================================================
-// TRY SESSION RESUME
+// RESUME
 // =============================================================
 
 async fn try_resume(
@@ -207,26 +121,9 @@ async fn try_resume(
 
     saved: SavedSession,
 ) -> Result<Option<ActiveSession>, Box<dyn std::error::Error>> {
-    println!();
-    println!("Saved PAYPHONE Session found");
+    println!("Back again, dude?");
 
-    print!("Session ID: ");
-
-    for byte in saved.session_id {
-        print!("{:02x}", byte);
-    }
-
-    println!();
-
-    //
-    // Создаём:
-    //
-    // BackAgainDude {
-    //     session_id,
-    //     resume_token
-    // }
-    //
-    let back_again = BackAgainDude::new(saved.session_id, saved.resume_token);
+    let message = BackAgainDude::new(saved.session_id, saved.resume_token);
 
     let frame = Frame {
         version: PROTOCOL_VERSION,
@@ -237,96 +134,68 @@ async fn try_resume(
 
         sequence: 1,
 
-        payload: back_again.encode(),
+        payload: message.encode(),
     };
 
-    println!("Back again, dude?");
-
-    //
-    // PAYPHONE Frame
-    //
-    // ->
-    //
-    // QUIC DATAGRAM.
-    //
     connection.send_datagram_wait(frame.encode()).await?;
 
-    //
-    // Сервер может:
-    //
-    // ответить StillGoodDude
-    //
-    // или
-    //
-    // вообще не подтвердить resume.
-    //
     let response = match time::timeout(Duration::from_secs(2), connection.read_datagram()).await {
         Ok(Ok(bytes)) => bytes,
 
-        //
-        // Timeout
-        // или ошибка QUIC.
-        //
         _ => {
             return Ok(None);
         }
     };
 
-    let frame = match Frame::decode(response) {
-        Ok(frame) => frame,
+    let frame = Frame::decode(response)?;
 
-        Err(_) => {
-            return Ok(None);
+    match frame.frame_type {
+        FrameType::StillGoodDude => {
+            let message = StillGoodDude::decode(frame.payload)?;
+
+            if message.session_id != saved.session_id {
+                return Ok(None);
+            }
+
+            println!("Still good, dude.");
+
+            Ok(Some(ActiveSession {
+                session_id: message.session_id,
+
+                assigned_ipv4: message.assigned_ipv4,
+
+                mtu: message.mtu,
+
+                capabilities: message.capabilities,
+            }))
         }
-    };
 
-    //
-    // Нас интересует только:
-    //
-    // StillGoodDude.
-    //
-    if frame.frame_type != FrameType::StillGoodDude {
-        return Ok(None);
+        FrameType::AccessDeniedDude => {
+            let denied = AccessDeniedDude::decode(frame.payload)?;
+
+            println!("Resume denied: {:?}", denied.reason);
+
+            Ok(None)
+        }
+
+        _ => Ok(None),
     }
-
-    let still_good = StillGoodDude::decode(frame.payload)?;
-
-    //
-    // Сервер обязан подтвердить
-    // именно ту Session,
-    // которую мы пытались восстановить.
-    //
-    if still_good.session_id != saved.session_id {
-        return Ok(None);
-    }
-
-    println!("Still good, dude.");
-
-    Ok(Some(ActiveSession {
-        session_id: still_good.session_id,
-
-        assigned_ipv4: still_good.assigned_ipv4,
-
-        mtu: still_good.mtu,
-
-        capabilities: still_good.capabilities,
-    }))
 }
 
 // =============================================================
-// CREATE NEW SESSION
+// NEW SESSION
 // =============================================================
 
 async fn create_new_session(
     connection: &Connection,
 ) -> Result<ActiveSession, Box<dyn std::error::Error>> {
-    println!();
-    println!("Creating new PAYPHONE Session");
+    //
+    // Настоящий подписочный token.
+    //
+    let token = fs::read(SUBSCRIPTION_FILE)
+        .map_err(|error| format!("cannot read {}: {}", SUBSCRIPTION_FILE, error))?;
 
-    //
-    // Первое сообщение клиента.
-    //
-    let whats_up = WhatsUpDude::new(CLIENT_VERSION, CLIENT_CAPABILITIES);
+    let whats_up = WhatsUpDude::new(CLIENT_VERSION, CLIENT_CAPABILITIES, Bytes::from(token));
 
     let frame = Frame {
         version: PROTOCOL_VERSION,
@@ -344,31 +213,25 @@ async fn create_new_session(
 
     connection.send_datagram_wait(frame.encode()).await?;
 
-    println!("WhatsUpDude sent");
+    let response = receive_frame(connection).await?;
 
-    //
-    // Получаем AllGoodDude.
-    //
-    let response_frame = receive_frame(connection).await?;
+    let all_good = match response.frame_type {
+        FrameType::AllGoodDude => AllGoodDude::decode(response.payload)?,
 
-    if response_frame.frame_type != FrameType::AllGoodDude {
-        return Err(format!("expected AllGoodDude, got {:?}", response_frame.frame_type).into());
-    }
+        FrameType::AccessDeniedDude => {
+            let denied = AccessDeniedDude::decode(response.payload)?;
 
-    let all_good = AllGoodDude::decode(response_frame.payload)?;
+            return Err(format!("PAYPHONE access denied: {:?}", denied.reason).into());
+        }
 
-    println!("All good, dude.");
+        other => {
+            return Err(format!("unexpected handshake frame: {:?}", other).into());
+        }
+    };
 
-    //
-    // Сохраняем:
-    //
-    // session_id
-    // +
-    // server_nonce как resume token.
-    //
     save_session(all_good.session_id, all_good.server_nonce)?;
 
-    println!("Session saved to {}", SESSION_FILE);
+    println!("All good, dude.");
 
     Ok(ActiveSession {
         session_id: all_good.session_id,
@@ -388,257 +251,321 @@ async fn create_new_session(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
-    // PAYPHONE server address.
+    // Пока localhost.
+    //
+    // Когда перенесём сервер:
+    // меняешь здесь public IP.
     //
     let server_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
 
-    println!("PAYPHONE client starting");
-
-    println!("Server: {}", server_address);
+    println!("PAYPHONE VPN client");
 
     //
-    // Создаём QUIC client Endpoint.
+    // QUIC/TLS.
     //
     let endpoint = create_client_endpoint()?;
 
-    println!("Connecting with QUIC + TLS 1.3...");
-
-    //
-    // Создаём QUIC Connection.
-    //
-    //
-    // SERVER_NAME:
-    //
-    // localhost
-    //
-    // rustls проверяет certificate
-    // именно для этого имени.
-    //
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 
     println!("QUIC + TLS 1.3 connected");
 
-    println!("Remote: {}", connection.remote_address());
-
     //
-    // =========================================================
-    // SESSION RESUME / CREATE
-    // =========================================================
+    // Resume или новый handshake.
     //
-
-    let active_session = if Path::new(SESSION_FILE).exists() {
-        //
-        // Файл есть.
-        //
-        // Пробуем восстановить Session.
-        //
+    let active = if Path::new(SESSION_FILE).exists() {
         match load_session() {
-            Some(saved) => {
-                match try_resume(&connection, saved).await? {
-                    //
-                    // Resume успешен.
-                    //
-                    Some(session) => {
-                        println!("PAYPHONE SESSION RESUMED");
+            Some(saved) => match try_resume(&connection, saved).await? {
+                Some(session) => {
+                    println!("PAYPHONE SESSION RESUMED");
 
-                        session
-                    }
-
-                    //
-                    // Session уже умерла,
-                    // сервер был перезапущен,
-                    // token неправильный и т.д.
-                    //
-                    None => {
-                        println!("Old Session unavailable");
-
-                        //
-                        // Удаляем старый state.
-                        //
-                        let _ = fs::remove_file(SESSION_FILE);
-
-                        create_new_session(&connection).await?
-                    }
+                    session
                 }
-            }
 
-            None => {
-                //
-                // Файл есть,
-                // но содержимое повреждено.
-                //
-                println!("Saved Session is invalid");
+                None => {
+                    let _ = fs::remove_file(SESSION_FILE);
 
-                let _ = fs::remove_file(SESSION_FILE);
+                    create_new_session(&connection).await?
+                }
+            },
 
-                create_new_session(&connection).await?
-            }
+            None => create_new_session(&connection).await?,
         }
     } else {
-        //
-        // Первый запуск.
-        //
         create_new_session(&connection).await?
     };
 
-    // =========================================================
-    // SESSION INFO
-    // =========================================================
-
-    println!();
-
-    print!("Session ID: ");
-
-    for byte in active_session.session_id {
-        print!("{:02x}", byte);
-    }
-
-    println!();
-
     println!(
-        "IPv4: {}.{}.{}.{}",
-        active_session.assigned_ipv4[0],
-        active_session.assigned_ipv4[1],
-        active_session.assigned_ipv4[2],
-        active_session.assigned_ipv4[3],
+        "VPN IPv4: {}.{}.{}.{}",
+        active.assigned_ipv4[0],
+        active.assigned_ipv4[1],
+        active.assigned_ipv4[2],
+        active.assigned_ipv4[3],
     );
 
-    println!("MTU: {}", active_session.mtu);
+    println!("VPN MTU: {}", active.mtu);
 
-    println!("Capabilities: {}", active_session.capabilities);
-
-    // =========================================================
-    // DATA CLIENT -> SERVER
-    // =========================================================
-
-    println!();
-    println!("Sending PAYPHONE DATA...");
+    println!("Capabilities: {}", active.capabilities);
 
     //
-    // Пока здесь текст.
-    //
-    // На этапе TUN здесь будет:
-    //
-    // настоящий IPv4/IPv6 packet.
-    //
-    let data = Data::new(
-        active_session.session_id,
-        1,
-        Bytes::from_static(b"Hello through encrypted PAYPHONE"),
-    );
-
-    let data_frame = Frame {
-        version: PROTOCOL_VERSION,
-
-        frame_type: FrameType::Data,
-
-        flags: 0,
-
-        sequence: 3,
-
-        payload: data.encode(),
-    };
-
-    connection.send_datagram_wait(data_frame.encode()).await?;
-
-    println!("DATA sent through QUIC");
-
     // =========================================================
-    // DATA SERVER -> CLIENT
+    // CREATE TUN
     // =========================================================
+    //
 
-    let response_frame = receive_frame(&connection).await?;
+    let tun = create_client_tun(
+        active.assigned_ipv4,
+        if active.mtu == 0 {
+            PAYPHONE_MTU
+        } else {
+            active.mtu
+        },
+    )?;
 
-    if response_frame.frame_type != FrameType::Data {
-        return Err(format!("expected DATA, got {:?}", response_frame.frame_type).into());
+    println!("PAYPHONE TUN created");
+
+    println!("Try: ping 10.77.0.1");
+
+    //
+    // Buffer настоящего IP packet.
+    //
+    let mut tun_buffer = vec![0u8; 65535];
+
+    let mut packet_id: u64 = 1;
+
+    let mut frame_sequence: u64 = 10;
+
+    let mut ping_id: u64 = 1;
+
+    let mut ping_timer = time::interval(PING_INTERVAL);
+
+    ping_timer.tick().await;
+
+    //
+    // =========================================================
+    // VPN LOOP
+    // =========================================================
+    //
+
+    loop {
+        tokio::select! {
+            //
+            // ---------------------------------------------
+            // TUN -> PAYPHONE -> QUIC
+            // ---------------------------------------------
+            //
+            result =
+                tun.recv(
+                    &mut tun_buffer
+                )
+            => {
+                let size =
+                    result?;
+
+                if size == 0 {
+                    continue;
+                }
+
+                let payload =
+                    Bytes::copy_from_slice(
+                        &tun_buffer[
+                            ..size
+                        ]
+                    );
+
+                let data =
+                    Data::new(
+                        active.session_id,
+                        packet_id,
+                        payload,
+                    );
+
+                let frame =
+                    Frame {
+                        version:
+                            PROTOCOL_VERSION,
+
+                        frame_type:
+                            FrameType::Data,
+
+                        flags: 0,
+
+                        sequence:
+                            frame_sequence,
+
+                        payload:
+                            data.encode(),
+                    };
+
+                connection
+                    .send_datagram_wait(
+                        frame.encode()
+                    )
+                    .await?;
+
+                packet_id =
+                    packet_id
+                        .wrapping_add(1);
+
+                frame_sequence =
+                    frame_sequence
+                        .wrapping_add(1);
+            }
+
+
+            //
+            // ---------------------------------------------
+            // QUIC -> PAYPHONE -> TUN
+            // ---------------------------------------------
+            //
+            result =
+                connection
+                    .read_datagram()
+            => {
+                let bytes =
+                    result?;
+
+                let frame =
+                    match Frame::decode(
+                        bytes
+                    ) {
+                        Ok(frame) => frame,
+
+                        Err(error) => {
+                            eprintln!(
+                                "Invalid PAYPHONE frame: {}",
+                                error
+                            );
+
+                            continue;
+                        }
+                    };
+
+                match frame.frame_type {
+                    FrameType::Data => {
+                        let data =
+                            Data::decode(
+                                frame.payload
+                            )?;
+
+                        if data.session_id
+                            != active.session_id
+                        {
+                            continue;
+                        }
+
+                        //
+                        // Вот здесь реальный IP packet
+                        // возвращается в macOS/Linux.
+                        //
+                        tun.send(
+                            &data.payload
+                        )
+                        .await?;
+                    }
+
+                    FrameType::Pong => {
+                        let pong =
+                            Pong::decode(
+                                frame.payload
+                            )?;
+
+                        if pong.session_id
+                            == active.session_id
+                        {
+                            println!(
+                                "PONG {}",
+                                pong.ping_id
+                            );
+                        }
+                    }
+
+                    FrameType::AccessDeniedDude => {
+                        let denied =
+                            AccessDeniedDude::decode(
+                                frame.payload
+                            )?;
+
+                        return Err(
+                            format!(
+                                "PAYPHONE access revoked: {:?}",
+                                denied.reason
+                            )
+                            .into()
+                        );
+                    }
+
+                    _ => {}
+                }
+            }
+
+
+            //
+            // ---------------------------------------------
+            // KEEPALIVE
+            // ---------------------------------------------
+            //
+            _ =
+                ping_timer.tick()
+            => {
+                let ping =
+                    Ping::new(
+                        active.session_id,
+                        ping_id,
+                    );
+
+                let frame =
+                    Frame {
+                        version:
+                            PROTOCOL_VERSION,
+
+                        frame_type:
+                            FrameType::Ping,
+
+                        flags: 0,
+
+                        sequence:
+                            frame_sequence,
+
+                        payload:
+                            ping.encode(),
+                    };
+
+                connection
+                    .send_datagram_wait(
+                        frame.encode()
+                    )
+                    .await?;
+
+                ping_id =
+                    ping_id
+                        .wrapping_add(1);
+
+                frame_sequence =
+                    frame_sequence
+                        .wrapping_add(1);
+            }
+
+
+            //
+            // ---------------------------------------------
+            // CTRL+C
+            // ---------------------------------------------
+            //
+            _ =
+                signal::ctrl_c()
+            => {
+                println!(
+                    "Stopping PAYPHONE VPN"
+                );
+
+                break;
+            }
+        }
     }
 
-    let response_data = Data::decode(response_frame.payload)?;
+    connection.close(0u32.into(), b"client shutdown");
 
-    //
-    // Проверяем Session ID.
-    //
-    if response_data.session_id != active_session.session_id {
-        return Err("DATA belongs to another PAYPHONE Session".into());
-    }
-
-    let text = String::from_utf8_lossy(&response_data.payload);
-
-    println!("Server DATA: {}", text);
-
-    // =========================================================
-    // PING
-    // =========================================================
-
-    println!();
-    println!("Sending PING...");
-
-    let ping = Ping::new(active_session.session_id, 1);
-
-    let ping_frame = Frame {
-        version: PROTOCOL_VERSION,
-
-        frame_type: FrameType::Ping,
-
-        flags: 0,
-
-        sequence: 5,
-
-        payload: ping.encode(),
-    };
-
-    connection.send_datagram_wait(ping_frame.encode()).await?;
-
-    println!("PING sent");
-
-    // =========================================================
-    // PONG
-    // =========================================================
-
-    let pong_frame = receive_frame(&connection).await?;
-
-    if pong_frame.frame_type != FrameType::Pong {
-        return Err(format!("expected PONG, got {:?}", pong_frame.frame_type).into());
-    }
-
-    let pong = Pong::decode(pong_frame.payload)?;
-
-    if pong.session_id != active_session.session_id {
-        return Err("PONG belongs to another PAYPHONE Session".into());
-    }
-
-    if pong.ping_id != 1 {
-        return Err(format!("wrong PONG ping_id: {}", pong.ping_id).into());
-    }
-
-    println!("PONG received");
-
-    println!("PAYPHONE connection is alive");
-
-    // =========================================================
-    // CLOSE QUIC
-    // =========================================================
-
-    //
-    // Закрываем физическое QUIC connection.
-    //
-    // PAYPHONE Session на сервере
-    // при этом остаётся жить,
-    // поэтому следующий запуск
-    // сможет сделать Resume.
-    //
-    connection.close(0u32.into(), b"client finished");
-
-    //
-    // Ждём, пока Endpoint закончит
-    // закрытие соединения.
-    //
     endpoint.wait_idle().await;
-
-    println!();
-    println!("QUIC connection closed");
-
-    println!("PAYPHONE Session remains resumable");
 
     Ok(())
 }

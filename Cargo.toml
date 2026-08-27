@@ -1,8 +1,13 @@
 [workspace]
+
 members = [
     "payphone-core",
+    "payphone-auth",
+    "payphone-transport",
+    "payphone-tun",
     "payphone-client",
     "payphone-server",
-    "payphone-transport"]
+    "payphone-token",
+]
 
 resolver = "2"

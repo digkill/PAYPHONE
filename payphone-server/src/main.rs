@@ -1,14 +1,26 @@
 use std::{
+    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
-use tokio::{signal, sync::RwLock, time};
+use bytes::Bytes;
 
-use payphone_core::DEFAULT_PORT;
+use ed25519_dalek::VerifyingKey;
+
+use payphone_auth::{MemoryRevocationStore, SubscriptionVerifier, VerificationKeyRing};
+
+use payphone_core::{DEFAULT_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data};
 
 use payphone_transport::server::create_server_endpoint;
+
+use payphone_tun::{create_server_tun, ipv4_destination};
+
+use tokio::{signal, sync::RwLock, time};
 
 mod handler;
 mod session;
@@ -16,158 +28,119 @@ mod session;
 use handler::handle_packet;
 use session::SessionManager;
 
-//
-// Как часто проверяем,
-// нет ли протухших PAYPHONE Sessions.
-//
-// Каждые 5 секунд.
-//
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //
-    // Адрес PAYPHONE server.
-    //
-    // Пока используем только localhost:
-    //
-    // 127.0.0.1:40404
-    //
-    // Когда пойдём на реальный сервер,
-    // здесь будет:
-    //
-    // 0.0.0.0:40404
-    //
-    let server_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT);
 
     //
-    // Создаём QUIC Endpoint.
-    //
-    // Внутри:
-    //
-    // UDP
-    // +
+    // =========================================================
     // QUIC
-    // +
-    // TLS 1.3
+    // =========================================================
     //
-    let endpoint = create_server_endpoint(server_address)?;
 
-    println!("PAYPHONE QUIC server listening on {}", server_address);
+    let endpoint = create_server_endpoint(address)?;
+
+    println!("PAYPHONE server: {}", address);
 
     //
-    // Создаём ОДИН SessionManager
-    // для всего сервера.
+    // =========================================================
+    // TUN
+    // =========================================================
     //
-    // Arc:
+
+    let tun = create_server_tun()?;
+
+    println!("PAYPHONE server TUN: 10.77.0.1/24");
+
     //
-    // несколько async task
-    // используют один объект.
+    // =========================================================
+    // SESSIONS
+    // =========================================================
     //
-    // RwLock:
-    //
-    // защищает SessionManager
-    // от одновременного изменения.
-    //
+
     let sessions = Arc::new(RwLock::new(SessionManager::new()));
 
     //
-    // Создаём периодический таймер.
+    // =========================================================
+    // AUTH
+    // =========================================================
     //
-    let mut cleanup_interval = time::interval(CLEANUP_INTERVAL);
+
+    let public_key = fs::read("auth-keys/subscription-public.key")?;
+
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| "subscription public key must be 32 bytes")?;
+
+    let public_key = VerifyingKey::from_bytes(&public_key)?;
+
+    let mut keys = VerificationKeyRing::new();
+
+    keys.insert(1, public_key);
+
+    let verifier = Arc::new(SubscriptionVerifier::new(
+        keys,
+        MemoryRevocationStore::new(),
+    ));
 
     //
-    // Первый interval tick
-    // происходит сразу.
+    // =========================================================
+    // SERVER -> CLIENT PACKET COUNTER
+    // =========================================================
     //
-    // Забираем его сейчас,
-    // чтобы следующий произошёл
-    // через реальные 5 секунд.
-    //
-    cleanup_interval.tick().await;
 
-    println!("PAYPHONE server ready");
+    let server_packet_id = Arc::new(AtomicU64::new(1));
 
-    //
-    // Главный цикл сервера.
-    //
+    let mut cleanup = time::interval(CLEANUP_INTERVAL);
+
+    cleanup.tick().await;
+
+    let mut tun_buffer = vec![0u8; 65535];
+
+    println!("PAYPHONE VPN ready");
+
     loop {
-        //
-        // Ждём одновременно:
-        //
-        // 1. новое QUIC connection
-        //
-        // 2. cleanup timer
-        //
-        // 3. Ctrl+C
-        //
         tokio::select! {
             //
-            // =====================================================
+            // =================================================
             // NEW QUIC CONNECTION
-            // =====================================================
+            // =================================================
             //
             incoming =
                 endpoint.accept()
             => {
-                //
-                // endpoint.accept()
-                //
-                // возвращает Option.
-                //
-                // Если Endpoint закрыт:
-                //
-                // None
-                //
                 let Some(incoming) =
                     incoming
                 else {
-                    println!(
-                        "QUIC endpoint closed"
-                    );
-
                     break;
                 };
 
-                //
-                // Этой новой task понадобится
-                // доступ к SessionManager.
-                //
-                // Arc::clone НЕ копирует
-                // SessionManager.
-                //
-                // Создаётся ещё один владелец
-                // того же объекта.
-                //
                 let sessions =
                     Arc::clone(
                         &sessions
                     );
 
-                //
-                // Каждый QUIC connection
-                // обслуживаем отдельной
-                // Tokio task.
-                //
+                let verifier =
+                    Arc::clone(
+                        &verifier
+                    );
+
+                let tun =
+                    Arc::clone(
+                        &tun
+                    );
+
                 tokio::spawn(
                     async move {
-                        //
-                        // incoming.await
-                        //
-                        // выполняет:
-                        //
-                        // QUIC handshake
-                        // +
-                        // TLS 1.3 handshake
-                        //
                         let connection =
                             match incoming.await {
-                                Ok(connection) => {
-                                    connection
-                                }
+                                Ok(connection) =>
+                                    connection,
 
                                 Err(error) => {
-                                    println!(
+                                    eprintln!(
                                         "QUIC handshake failed: {}",
                                         error
                                     );
@@ -176,86 +149,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             };
 
-                        //
-                        // Физический адрес peer.
-                        //
-                        // Например:
-                        //
-                        // 127.0.0.1:53421
-                        //
-                        let client_address =
+                        let address =
                             connection
                                 .remote_address();
 
-                        println!();
                         println!(
-                            "QUIC + TLS connection established"
+                            "Client connected: {}",
+                            address
                         );
 
-                        println!(
-                            "Client: {}",
-                            client_address
-                        );
-
-                        //
-                        // Пока QUIC connection живёт,
-                        // читаем application datagrams.
-                        //
                         loop {
-                            //
-                            // read_datagram()
-                            //
-                            // возвращает уже расшифрованный
-                            // payload QUIC datagram.
-                            //
                             let packet =
                                 match connection
                                     .read_datagram()
                                     .await
                                 {
-                                    Ok(packet) => {
-                                        packet
-                                    }
+                                    Ok(packet) =>
+                                        packet,
 
-                                    Err(error) => {
-                                        println!(
-                                            "QUIC connection {} closed: {}",
-                                            client_address,
-                                            error
-                                        );
-
-                                        break;
-                                    }
+                                    Err(_) =>
+                                        break,
                                 };
 
-                            //
-                            // Клонируем Connection handle.
-                            //
-                            // Сам QUIC connection
-                            // не копируется.
-                            //
-                            let connection_clone =
-                                connection.clone();
-
-                            //
-                            // Клонируем Arc
-                            // SessionManager.
-                            //
-                            let sessions_clone =
+                            let sessions =
                                 Arc::clone(
                                     &sessions
                                 );
 
-                            //
-                            // Каждый PAYPHONE Frame
-                            // обрабатывается отдельной task.
-                            //
+                            let verifier =
+                                Arc::clone(
+                                    &verifier
+                                );
+
+                            let tun =
+                                Arc::clone(
+                                    &tun
+                                );
+
+                            let connection_clone =
+                                connection.clone();
+
                             tokio::spawn(
                                 async move {
                                     handle_packet(
                                         connection_clone,
-                                        sessions_clone,
-                                        client_address,
+                                        sessions,
+                                        verifier,
+                                        tun,
+                                        address,
                                         packet,
                                     )
                                     .await;
@@ -268,88 +209,165 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
             //
-            // =====================================================
-            // SESSION CLEANUP
-            // =====================================================
+            // =================================================
+            // SERVER TUN -> PAYPHONE CLIENT
+            // =================================================
+            //
+            result =
+                tun.recv(
+                    &mut tun_buffer
+                )
+            => {
+                let size =
+                    result?;
+
+                if size == 0 {
+                    continue;
+                }
+
+                let packet =
+                    &tun_buffer[
+                        ..size
+                    ];
+
+                let Some(destination) =
+                    ipv4_destination(
+                        packet
+                    )
+                else {
+                    //
+                    // IPv6 добавим следующим слоем.
+                    //
+                    continue;
+                };
+
+                //
+                // По destination VPN IP
+                // находим Session.
+                //
+                let route =
+                    {
+                        let manager =
+                            sessions
+                                .read()
+                                .await;
+
+                        manager
+                            .find_by_ipv4(
+                                destination
+                            )
+                            .map(
+                                |session| {
+                                    (
+                                        session.id,
+                                        session
+                                            .connection
+                                            .clone(),
+                                    )
+                                }
+                            )
+                    };
+
+                let Some(
+                    (
+                        session_id,
+                        connection,
+                    )
+                ) = route
+                else {
+                    continue;
+                };
+
+                let id =
+                    server_packet_id
+                        .fetch_add(
+                            1,
+                            Ordering::Relaxed,
+                        );
+
+                let data =
+                    Data::new(
+                        session_id,
+                        id,
+                        Bytes::copy_from_slice(
+                            packet
+                        ),
+                    );
+
+                let frame =
+                    Frame {
+                        version:
+                            PROTOCOL_VERSION,
+
+                        frame_type:
+                            FrameType::Data,
+
+                        flags: 0,
+
+                        sequence:
+                            id,
+
+                        payload:
+                            data.encode(),
+                    };
+
+                if let Err(error) =
+                    connection
+                        .send_datagram_wait(
+                            frame.encode()
+                        )
+                        .await
+                {
+                    eprintln!(
+                        "QUIC DATA send error: {}",
+                        error
+                    );
+                }
+            }
+
+
+            //
+            // =================================================
+            // CLEANUP
+            // =================================================
             //
             _ =
-                cleanup_interval.tick()
+                cleanup.tick()
             => {
-                //
-                // remove_expired()
-                // изменяет SessionManager.
-                //
-                // Поэтому:
-                //
-                // write().await
-                //
-                let mut sessions =
+                let mut manager =
                     sessions
                         .write()
                         .await;
 
                 let removed =
-                    sessions
+                    manager
                         .remove_expired();
 
                 if removed > 0 {
-                    println!();
                     println!(
                         "Removed {} expired session(s)",
                         removed
-                    );
-
-                    println!(
-                        "Active sessions: {}",
-                        sessions.len()
                     );
                 }
             }
 
 
             //
-            // =====================================================
-            // CTRL+C
-            // =====================================================
+            // =================================================
+            // SHUTDOWN
+            // =================================================
             //
-            result =
+            _ =
                 signal::ctrl_c()
             => {
-                println!();
-
-                match result {
-                    Ok(()) => {
-                        println!(
-                            "PAYPHONE server shutting down"
-                        );
-                    }
-
-                    Err(error) => {
-                        println!(
-                            "Ctrl+C signal error: {}",
-                            error
-                        );
-                    }
-                }
-
                 break;
             }
         }
     }
 
-    //
-    // Корректно закрываем
-    // все QUIC connections.
-    //
-    endpoint.close(0u32.into(), b"PAYPHONE server shutdown");
+    endpoint.close(0u32.into(), b"server shutdown");
 
-    //
-    // Даём Quinn возможность
-    // закончить отправку close packets.
-    //
     endpoint.wait_idle().await;
-
-    println!("PAYPHONE server stopped");
 
     Ok(())
 }

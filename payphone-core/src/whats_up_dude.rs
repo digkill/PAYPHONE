@@ -4,171 +4,82 @@ use rand::RngCore;
 
 use crate::{FrameError, PROTOCOL_VERSION};
 
-//
-// Размер client nonce.
-//
-// 32 bytes = 256 bits.
-//
+/// Размер client nonce.
 pub const CLIENT_NONCE_SIZE: usize = 32;
 
-//
-// Размер сообщения WhatsUpDude.
-//
-// protocol_version = 1 byte
-// client_version   = 2 bytes
-// capabilities     = 4 bytes
-// client_nonce     = 32 bytes
-//
-// Итого:
-//
-// 1 + 2 + 4 + 32 = 39 bytes
-//
-pub const WHATS_UP_DUDE_SIZE: usize = 39;
+/// Фиксированная часть WhatsUpDude.
+///
+/// protocol_version = 1
+/// client_version   = 2
+/// capabilities     = 4
+/// client_nonce     = 32
+/// token_len        = 2
+///
+/// Итого:
+///
+/// 1 + 2 + 4 + 32 + 2 = 41 bytes
+pub const WHATS_UP_DUDE_HEADER_SIZE: usize = 41;
 
-//
-// CAP = capability.
-//
-// Capability означает:
-//
-// "какую функцию поддерживает клиент".
-//
-// Каждый capability занимает один бит
-// внутри числа u32.
-//
+/// Максимальный размер auth token.
+///
+/// Сейчас SubscriptionToken v1 = 135 bytes.
+///
+/// Но wire protocol сразу допускает
+/// будущие версии token.
+pub const MAX_AUTH_TOKEN_SIZE: usize = 2048;
 
-//
-// BIT 0
-//
-// IPv4 support.
-//
-// Двоично:
-//
-// 00001
-//
+// =============================================================
+// CAPABILITIES
+// =============================================================
+
 pub const CAP_IPV4: u32 = 1 << 0;
 
-//
-// BIT 1
-//
-// IPv6 support.
-//
-// 00010
-//
 pub const CAP_IPV6: u32 = 1 << 1;
 
-//
-// BIT 2
-//
-// PAYPHONE DNS support.
-//
-// 00100
-//
 pub const CAP_DNS: u32 = 1 << 2;
 
-//
-// BIT 3
-//
-// Возможность восстановить
-// существующую Session.
-//
 pub const CAP_RESUME: u32 = 1 << 3;
 
-//
-// BIT 4
-//
-// Возможность продолжить Session
-// после изменения сетевого пути.
-//
 pub const CAP_ROAMING: u32 = 1 << 4;
 
-//
-// Первое handshake-сообщение PAYPHONE.
-//
-// Клиент:
-//
-// "What's up, dude?"
-//
-// Сервер позже ответит:
-//
-// "All good, dude."
-//
+// =============================================================
+// WHATS UP DUDE
+// =============================================================
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhatsUpDude {
-    //
-    // Версия сетевого протокола.
-    //
-    // Сейчас:
-    //
-    // PAYPHONE/1
-    //
-    // поэтому:
-    //
-    // protocol_version = 1
-    //
+    /// PAYPHONE/1.
     pub protocol_version: u8,
 
-    //
-    // Версия самой клиентской программы.
-    //
-    // Это отдельная вещь.
-    //
-    // Например:
-    //
-    // PAYPHONE protocol = 1
-    //
-    // но программа клиента
-    // может иметь версии:
-    //
-    // 1
-    // 2
-    // 3
-    // 10
-    //
+    /// Версия программы клиента.
     pub client_version: u16,
 
-    //
-    // Набор функций,
-    // которые поддерживает клиент.
-    //
+    /// Capabilities клиента.
     pub capabilities: u32,
 
-    //
-    // Случайные 32 bytes.
-    //
-    // Генерируются заново
-    // при создании WhatsUpDude.
-    //
+    /// Случайные данные handshake.
     pub client_nonce: [u8; CLIENT_NONCE_SIZE],
+
+    /// Подписочный PAYPHONE token.
+    ///
+    /// Здесь просто bytes.
+    ///
+    /// payphone-core ничего не знает
+    /// про Ed25519 или подписки.
+    ///
+    /// Разбирать token будет
+    /// payphone-auth на сервере.
+    pub auth_token: Bytes,
 }
 
 impl WhatsUpDude {
-    //
-    // Создаём новое сообщение
-    // "What's up, dude?"
-    //
-    pub fn new(client_version: u16, capabilities: u32) -> Self {
-        //
-        // Создаём массив из 32 нулей:
-        //
-        // 00 00 00 00 ...
-        //
+    pub fn new(client_version: u16, capabilities: u32, auth_token: Bytes) -> Self {
         let mut client_nonce = [0u8; CLIENT_NONCE_SIZE];
 
-        //
-        // Получаем генератор
-        // случайных чисел.
-        //
         let mut rng = rand::rng();
 
-        //
-        // Перезаписываем наши нули
-        // случайными байтами.
-        //
         rng.fill_bytes(&mut client_nonce);
 
-        //
-        // Возвращаем готовую структуру.
-        //
         Self {
             protocol_version: PROTOCOL_VERSION,
 
@@ -177,180 +88,139 @@ impl WhatsUpDude {
             capabilities,
 
             client_nonce,
+
+            auth_token,
         }
     }
 
-    //
-    // Проверяем:
-    //
-    // поддерживает ли клиент
-    // конкретную возможность.
-    //
     pub fn supports(&self, capability: u32) -> bool {
-        //
-        // Побитовое AND.
-        //
-        // Например:
-        //
-        // capabilities:
-        //
-        // 00111
-        //
-        // CAP_IPV6:
-        //
-        // 00010
-        //
-        // AND:
-        //
-        // 00010
-        //
-        // Это НЕ 0.
-        //
-        // Значит IPv6 поддерживается.
-        //
         self.capabilities & capability != 0
     }
 
-    //
-    // WhatsUpDude -> bytes
-    //
+    // =========================================================
+    // ENCODE
+    // =========================================================
+
     pub fn encode(&self) -> Bytes {
-        //
-        // Создаём буфер ровно
-        // под наше сообщение.
-        //
-        let mut buffer = BytesMut::with_capacity(WHATS_UP_DUDE_SIZE);
+        let token_len = self.auth_token.len();
 
         //
+        // new() принимает Bytes любого размера,
+        // поэтому encode защищаем assert.
+        //
+        // Позже можно перевести encode на Result,
+        // но пока конструктор клиента будет
+        // проверять token до создания Frame.
+        //
+        assert!(
+            token_len <= MAX_AUTH_TOKEN_SIZE,
+            "PAYPHONE auth token is too large"
+        );
+
+        assert!(
+            token_len <= u16::MAX as usize,
+            "PAYPHONE auth token cannot fit into u16"
+        );
+
+        let mut buffer = BytesMut::with_capacity(WHATS_UP_DUDE_HEADER_SIZE + token_len);
+
         // BYTE 0
-        //
-        // protocol_version
-        //
         buffer.put_u8(self.protocol_version);
 
-        //
         // BYTE 1-2
-        //
-        // client_version
-        //
         buffer.put_u16(self.client_version);
 
-        //
         // BYTE 3-6
-        //
-        // capabilities
-        //
         buffer.put_u32(self.capabilities);
 
-        //
         // BYTE 7-38
-        //
-        // client_nonce
-        //
         buffer.extend_from_slice(&self.client_nonce);
 
-        //
-        // Возвращаем готовые bytes.
-        //
+        // BYTE 39-40
+        buffer.put_u16(token_len as u16);
+
+        // BYTE 41...
+        buffer.extend_from_slice(&self.auth_token);
+
         buffer.freeze()
     }
 
-    //
-    // bytes -> WhatsUpDude
-    //
+    // =========================================================
+    // DECODE
+    // =========================================================
+
     pub fn decode(mut buffer: Bytes) -> Result<Self, FrameError> {
         //
-        // Сообщение обязано
-        // занимать ровно 39 bytes.
+        // Теперь WhatsUpDude
+        // переменной длины.
         //
-        if buffer.len() != WHATS_UP_DUDE_SIZE {
+        // Поэтому проверяем не ==,
+        // а минимальный header.
+        //
+        if buffer.len() < WHATS_UP_DUDE_HEADER_SIZE {
             return Err(FrameError::InvalidWhatsUpDudeLength);
         }
 
-        //
-        // BYTE 0
-        //
         let protocol_version = buffer.get_u8();
 
-        //
-        // BYTE 1-2
-        //
         let client_version = buffer.get_u16();
 
-        //
-        // BYTE 3-6
-        //
         let capabilities = buffer.get_u32();
 
-        //
-        // Создаём массив
-        // для client_nonce.
-        //
         let mut client_nonce = [0u8; CLIENT_NONCE_SIZE];
 
-        //
-        // После чтения:
-        //
-        // version
-        // client_version
-        // capabilities
-        //
-        // в buffer осталось ровно
-        // 32 bytes.
-        //
-        // Копируем их в client_nonce.
-        //
         buffer.copy_to_slice(&mut client_nonce);
 
         //
-        // Возвращаем готовую структуру.
+        // Клиент сам сообщает,
+        // сколько bytes занимает token.
         //
+        let token_len = buffer.get_u16() as usize;
+
+        if token_len == 0 {
+            return Err(FrameError::MissingAuthToken);
+        }
+
+        if token_len > MAX_AUTH_TOKEN_SIZE {
+            return Err(FrameError::AuthTokenTooLarge);
+        }
+
+        //
+        // После token_len должно оставаться
+        // ровно token_len bytes.
+        //
+        if buffer.remaining() != token_len {
+            return Err(FrameError::InvalidAuthTokenLength);
+        }
+
+        let auth_token = buffer.copy_to_bytes(token_len);
+
         Ok(Self {
             protocol_version,
             client_version,
             capabilities,
             client_nonce,
+            auth_token,
         })
     }
 }
 
-//
-// Тесты конкретно для WhatsUpDude.
-//
+// =============================================================
+// TESTS
+// =============================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    //
-    // Проверяем полный цикл:
-    //
-    // struct
-    //   ↓
-    // encode
-    //   ↓
-    // bytes
-    //   ↓
-    // decode
-    //   ↓
-    // struct
-    //
     #[test]
     fn whats_up_dude_roundtrip() {
-        let original = WhatsUpDude::new(1, CAP_IPV4 | CAP_IPV6 | CAP_DNS);
+        let token = Bytes::from_static(b"fake-subscription-token");
 
-        //
-        // Кодируем.
-        //
+        let original = WhatsUpDude::new(1, CAP_IPV4 | CAP_IPV6 | CAP_DNS, token.clone());
+
         let encoded = original.encode();
 
-        //
-        // Размер обязан быть 39.
-        //
-        assert_eq!(encoded.len(), WHATS_UP_DUDE_SIZE);
-
-        //
-        // Декодируем.
-        //
         let decoded = WhatsUpDude::decode(encoded).expect("WhatsUpDude decode failed");
 
         assert_eq!(decoded.protocol_version, PROTOCOL_VERSION);
@@ -363,46 +233,37 @@ mod tests {
 
         assert!(decoded.supports(CAP_DNS));
 
-        //
-        // Мы CAP_RESUME
-        // не включали.
-        //
-        assert!(!decoded.supports(CAP_RESUME));
+        assert_eq!(decoded.auth_token, token);
 
-        //
-        // Nonce после encode/decode
-        // обязан остаться тем же.
-        //
         assert_eq!(decoded.client_nonce, original.client_nonce);
     }
 
-    //
-    // Два новых сообщения
-    // должны получить разные nonce.
-    //
     #[test]
     fn whats_up_dude_nonce_is_random() {
-        let first = WhatsUpDude::new(1, 0);
+        let first = WhatsUpDude::new(1, 0, Bytes::from_static(b"token"));
 
-        let second = WhatsUpDude::new(1, 0);
+        let second = WhatsUpDude::new(1, 0, Bytes::from_static(b"token"));
 
         assert_ne!(first.client_nonce, second.client_nonce);
     }
 
-    //
-    // Проверяем неправильный размер.
-    //
     #[test]
     fn invalid_size_fails() {
-        //
-        // Всего 3 bytes.
-        //
-        // Нам нужно 39.
-        //
         let data = Bytes::from_static(&[1, 2, 3]);
 
         let result = WhatsUpDude::decode(data);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_token_fails() {
+        let message = WhatsUpDude::new(1, 0, Bytes::new());
+
+        let encoded = message.encode();
+
+        let result = WhatsUpDude::decode(encoded);
+
+        assert!(matches!(result, Err(FrameError::MissingAuthToken)));
     }
 }

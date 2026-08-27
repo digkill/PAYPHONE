@@ -4,17 +4,40 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-payphone-core = { path = "../payphone-core" }
-payphone-transport = { path = "../payphone-transport" }
+payphone-core = {
+    path = "../payphone-core"
+}
+
+payphone-auth = {
+    path = "../payphone-auth"
+}
+
+payphone-transport = {
+    path = "../payphone-transport"
+}
+
+payphone-tun = {
+    path = "../payphone-tun"
+}
 
 bytes = "1"
 quinn = "0.11.11"
 
-tokio = { version = "1", features = [
-    "rt-multi-thread",
-    "macros",
-    "net",
-    "time",
-    "signal",
-    "sync"
-] }
+ed25519-dalek = {
+    version = "3",
+    features = [
+        "pkcs8"
+    ]
+}
+
+tokio = {
+    version = "1",
+    features = [
+        "rt-multi-thread",
+        "macros",
+        "net",
+        "time",
+        "signal",
+        "sync"
+    ]
+}

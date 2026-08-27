@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 //
 // Подключаем модули PAYPHONE core.
 //
+pub mod access_denied_dude;
 pub mod all_good_dude;
 pub mod back_again_dude;
 pub mod data;
@@ -105,6 +106,11 @@ pub enum FrameType {
     ///
     /// "Still good, dude."
     StillGoodDude = 9,
+
+    /// Сервер отказал клиенту.
+    ///
+    /// "Access denied, dude."
+    AccessDeniedDude = 10,
 }
 
 //
@@ -171,6 +177,21 @@ pub enum FrameError {
     /// PONG имеет неправильный размер.
     #[error("invalid PONG length")]
     InvalidPongLength,
+
+    #[error("PAYPHONE auth token is missing")]
+    MissingAuthToken,
+
+    #[error("invalid PAYPHONE auth token length")]
+    InvalidAuthTokenLength,
+
+    #[error("PAYPHONE auth token is too large")]
+    AuthTokenTooLarge,
+
+    #[error("invalid AccessDeniedDude length")]
+    InvalidAccessDeniedDudeLength,
+
+    #[error("unknown access deny reason: {0}")]
+    UnknownDenyReason(u8),
 }
 
 //
@@ -209,6 +230,8 @@ impl TryFrom<u8> for FrameType {
             8 => Ok(FrameType::BackAgainDude),
 
             9 => Ok(FrameType::StillGoodDude),
+
+            10 => Ok(FrameType::AccessDeniedDude),
 
             _ => Err(FrameError::UnknownFrameType(value)),
         }
@@ -538,7 +561,11 @@ mod tests {
 
     #[test]
     fn whats_up_dude_inside_frame_roundtrip() {
-        let message = WhatsUpDude::new(1, CAP_IPV4 | CAP_IPV6 | CAP_DNS);
+        let message = WhatsUpDude::new(
+            1,
+            CAP_IPV4 | CAP_IPV6 | CAP_DNS,
+            Bytes::from_static(b"test-token"),
+        );
 
         let frame = Frame {
             version: PROTOCOL_VERSION,

@@ -1,0 +1,21 @@
+[package]
+name = "payphone-auth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ed25519-dalek = {
+    version = "3",
+    features = [
+        "rand_core",
+        "pkcs8"
+    ]
+}
+
+rand_core = {
+    version = "0.9",
+    features = ["os_rng"]
+}
+
+thiserror = "2"
+bytes = "1"
