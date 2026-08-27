@@ -78,6 +78,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PAYPHONE server: {}", address);
 
     //
+    // Печатаем собственный (само-подписанный, публичный) сертификат
+    // в лог как hex. Сертификат — не секрет, в отличие от ключа,
+    // который его подписал и который никуда не уходит с этой машины.
+    //
+    // Клиент пинит именно этот файл (`identity::CERT_PATH`), поэтому
+    // при первом подключении к новому серверу оператору нужно
+    // скопировать этот hex в `dev-certs/payphone-cert.der` на
+    // клиентской машине:
+    //
+    //   echo <hex> | xxd -r -p > dev-certs/payphone-cert.der
+    //
+    let certificate_bytes = fs::read(payphone_transport::identity::CERT_PATH)?;
+
+    print!("PAYPHONE server certificate (hex, copy to client's dev-certs/payphone-cert.der): ");
+
+    for byte in &certificate_bytes {
+        print!("{:02x}", byte);
+    }
+
+    println!();
+
+    //
     // =========================================================
     // TUN
     // =========================================================
