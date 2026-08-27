@@ -112,6 +112,20 @@ The client stores a 48-byte session ID/resume-token pair in `.payphone-session`.
 
 To force a new authenticated handshake, delete `.payphone-session` before starting the client.
 
+## Docker / remote deployment
+
+The `Dockerfile` builds `server`, `client`, and `token` images from the same multi-stage build. Locally, `docker-compose.yml` runs server + client + a one-off token issuer together.
+
+For a **remote server deployment** (e.g. behind a PaaS like Coolify), use `docker-compose.server.yml` instead of a platform's generic "port mapping" UI/API field. Many such tools default to TCP-only port publishing and either reject a `/udp` suffix outright or silently drop it — `docker ps` then shows the port as merely *exposed*, not actually published (`40404/udp` instead of `0.0.0.0:40404->40404/udp`), and UDP datagrams die at the host's network interface with zero visibility into why. A native Compose `ports: - "40404:40404/udp"` entry doesn't have this problem. Set `PAYPHONE_BIND_ADDR`, `PAYPHONE_OBFS_PSK`, and `PAYPHONE_DEV_MODE` through the platform's own environment variable mechanism.
+
+Because the server's self-signed dev certificate regenerates on every redeploy (it isn't persisted across container restarts), the client's pinned `dev-certs/payphone-cert.der` needs updating after each redeploy. The server logs its own certificate as hex on startup for exactly this purpose — copy that value into the client's `dev-certs/payphone-cert.der`:
+
+```bash
+echo <hex from server logs> | xxd -r -p > dev-certs/payphone-cert.der
+```
+
+Set `PAYPHONE_DEV_MODE=true` on both sides to log every raw UDP datagram (size + sender) before obfuscation is attempted — useful when diagnosing whether packets are reaching the server at all versus being rejected after arrival. Leave it `false` (the default) otherwise: staying silent toward unrecognized traffic is part of the defense against DPI active-probing (see [Wire obfuscation](#wire-obfuscation)).
+
 ## Subscription token tool
 
 Generate a key pair once:
