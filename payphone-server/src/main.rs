@@ -114,9 +114,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // интернет не пересылаются — клиент подключится, но
     // реального доступа наружу не получит.
     //
-    payphone_tun::routing::enable_server_forwarding(payphone_tun::routing::PAYPHONE_SUBNET_CIDR)?;
+    // Не фатально: если хостовое ядро/iptables не даёт это
+    // настроить (например, нет nft/legacy совместимости или
+    // недостаточно прав в этом окружении), VPN-сессии и
+    // туннелирование внутри 10.77.0.0/24 всё равно должны
+    // работать — падать из-за этого не нужно.
+    //
+    match payphone_tun::routing::enable_server_forwarding(
+        payphone_tun::routing::PAYPHONE_SUBNET_CIDR,
+    ) {
+        Ok(()) => println!("PAYPHONE server forwarding/NAT enabled for 10.77.0.0/24"),
 
-    println!("PAYPHONE server forwarding/NAT enabled for 10.77.0.0/24");
+        Err(error) => eprintln!(
+            "PAYPHONE server forwarding/NAT setup failed ({error}); \
+             clients will only reach 10.77.0.0/24, not the wider internet"
+        ),
+    }
 
     //
     // =========================================================
