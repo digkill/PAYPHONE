@@ -27,15 +27,39 @@ pub fn status(text: &str) {
     println!("{BRIGHT_GREEN}▸ {text}{RESET}");
 }
 
+//
+// Реальная ширина терминала.
+//
+// $COLUMNS — переменная шелла, обычно НЕ проброшена в дочерний
+// процесс (не exported), поэтому читать её из env почти всегда
+// бессмысленно. Если строка окажется шире настоящего терминала,
+// она перенесётся, и на следующем кадре "\x1b[H" (домой) уже не
+// совпадёт с логическими координатами кадра — с каждым кадром
+// рисунок расползается по диагонали. `tput cols` спрашивает
+// реальный размер у самого терминала.
+//
+fn terminal_width() -> usize {
+    std::process::Command::new("tput")
+        .arg("cols")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .filter(|&width| width > 0)
+        .map(|width| width.min(200))
+        .unwrap_or(60)
+}
+
 /// Краткая анимация "цифрового дождя" перед подключением.
 ///
 /// Чистая заставка: ~1.2 секунды, синхронно, до старта реальной
 /// работы клиента.
 pub fn rain_intro() {
-    let width: usize = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(70);
+    //
+    // -1 запасом: некоторые терминалы переносят строку, если она
+    // заполняет колонку впритык до последнего символа.
+    //
+    let width = terminal_width().saturating_sub(1).max(20);
 
     let height: usize = 12;
 
