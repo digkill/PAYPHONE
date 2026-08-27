@@ -31,8 +31,27 @@ pub const PAYPHONE_SUBNET_CIDR: &str = "10.77.0.0/24";
 /// iptables-правила.
 #[cfg(target_os = "linux")]
 pub fn enable_server_forwarding(subnet_cidr: &str) -> io::Result<()> {
-    std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1")
-        .map_err(|error| io::Error::other(format!("failed to enable ip_forward: {error}")))?;
+    //
+    // /proc/sys/net/ipv4/ip_forward часто смонтирован read-only
+    // внутри контейнера, даже с NET_ADMIN — docker включает его
+    // через `--sysctl net.ipv4.ip_forward=1` до старта процесса,
+    // а не через запись в этот файл изнутри. Поэтому сначала
+    // проверяем текущее значение и пишем, только если оно ещё
+    // не "1" — иначе получим ложную ошибку на read-only fs, хотя
+    // forwarding уже включён снаружи.
+    //
+    let already_enabled = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+
+    if !already_enabled {
+        std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1").map_err(|error| {
+            io::Error::other(format!(
+                "failed to enable ip_forward: {error} \
+                 (pass `--sysctl net.ipv4.ip_forward=1` to the container instead)"
+            ))
+        })?;
+    }
 
     linux::ensure_iptables_rule(&[
         "-t",
