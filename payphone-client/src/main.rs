@@ -28,6 +28,8 @@ use payphone_transport::{
 
 use payphone_tun::{PAYPHONE_MTU, create_client_tun};
 
+mod matrix;
+
 // =============================================================
 // CONFIG
 // =============================================================
@@ -123,7 +125,7 @@ async fn try_resume(
 
     saved: SavedSession,
 ) -> Result<Option<ActiveSession>, Box<dyn std::error::Error>> {
-    println!("Back again, dude?");
+    matrix::status("Back again, dude?");
 
     let message = BackAgainDude::new(saved.session_id, saved.resume_token);
 
@@ -159,7 +161,7 @@ async fn try_resume(
                 return Ok(None);
             }
 
-            println!("Still good, dude.");
+            matrix::status("Still good, dude.");
 
             Ok(Some(ActiveSession {
                 session_id: message.session_id,
@@ -211,7 +213,7 @@ async fn create_new_session(
         payload: whats_up.encode(),
     };
 
-    println!("What's up, dude?");
+    matrix::status("What's up, dude?");
 
     connection.send_datagram_wait(frame.encode()).await?;
 
@@ -233,7 +235,7 @@ async fn create_new_session(
 
     save_session(all_good.session_id, all_good.server_nonce)?;
 
-    println!("All good, dude.");
+    matrix::status("All good, dude.");
 
     Ok(ActiveSession {
         session_id: all_good.session_id,
@@ -303,7 +305,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    println!("PAYPHONE VPN client");
+    matrix::rain_intro();
+
+    matrix::banner();
 
     //
     // QUIC/TLS.
@@ -312,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 
-    println!("QUIC + TLS 1.3 connected");
+    matrix::status("QUIC + TLS 1.3 connected");
 
     //
     // Resume или новый handshake.
@@ -321,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match load_session() {
             Some(saved) => match try_resume(&connection, saved).await? {
                 Some(session) => {
-                    println!("PAYPHONE SESSION RESUMED");
+                    matrix::status("PAYPHONE SESSION RESUMED");
 
                     session
                 }
@@ -339,17 +343,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_new_session(&connection).await?
     };
 
-    println!(
+    matrix::status(&format!(
         "VPN IPv4: {}.{}.{}.{}",
         active.assigned_ipv4[0],
         active.assigned_ipv4[1],
         active.assigned_ipv4[2],
         active.assigned_ipv4[3],
-    );
+    ));
 
-    println!("VPN MTU: {}", active.mtu);
+    matrix::status(&format!("VPN MTU: {}", active.mtu));
 
-    println!("Capabilities: {}", active.capabilities);
+    matrix::status(&format!("Capabilities: {}", active.capabilities));
 
     //
     // =========================================================
@@ -366,7 +370,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    println!("PAYPHONE TUN created");
+    matrix::status("PAYPHONE TUN created");
 
     //
     // Без этого через TUN идёт только трафик к 10.77.0.0/24 —
@@ -379,7 +383,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _full_tunnel =
         match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
             Ok(guard) => {
-                println!("Full-tunnel routing enabled (all traffic now goes through PAYPHONE)");
+                matrix::status(
+                    "Full-tunnel routing enabled (all traffic now goes through PAYPHONE)",
+                );
+
+                matrix::tunnel_open_banner();
 
                 Some(guard)
             }
@@ -394,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-    println!("Try: ping 10.77.0.1");
+    matrix::status("Try: ping 10.77.0.1");
 
     //
     // Buffer настоящего IP packet.
@@ -410,6 +418,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ping_timer = time::interval(PING_INTERVAL);
 
     ping_timer.tick().await;
+
+    let mut flow = matrix::FlowIndicator::new();
 
     //
     // =========================================================
@@ -473,6 +483,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .await?;
 
+                flow.pulse('▸');
+
                 packet_id =
                     packet_id
                         .wrapping_add(1);
@@ -532,6 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &data.payload
                         )
                         .await?;
+
+                        flow.pulse('◂');
                     }
 
                     FrameType::Pong => {
@@ -625,7 +639,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ =
                 signal::ctrl_c()
             => {
-                println!(
+                //
+                // Перевод строки после хвоста "▸◂"-индикаторов
+                // (они печатаются без \n).
+                //
+                println!();
+
+                matrix::status(
                     "Stopping PAYPHONE VPN"
                 );
 
