@@ -1,0 +1,23 @@
+# Server-only compose file for Coolify (or any host) deployment.
+#
+# Exists separately from docker-compose.yml because Coolify's own
+# "Ports Mappings" UI/API field cannot express a UDP port — its
+# validation only accepts bare TCP host:container pairs. A native
+# docker-compose "ports:" entry with the /udp suffix is the only
+# reliable way to get Coolify to actually publish a UDP port.
+#
+# Env vars (PAYPHONE_BIND_ADDR, PAYPHONE_OBFS_PSK, PAYPHONE_DEV_MODE)
+# are injected by Coolify's own application environment settings,
+# not hardcoded here.
+services:
+  payphone-server:
+    build:
+      context: .
+      target: server
+    ports:
+      - "40404:40404/udp"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: unless-stopped
