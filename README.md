@@ -20,6 +20,7 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - Periodic `PING`/`PONG` keepalives
 - Source-address validation for packets received from clients
 - Concurrent client handling with Tokio
+- Full-tunnel routing: the server enables IPv4 forwarding + NAT for the tunnel subnet, and the client overrides its default route through the TUN interface (macOS and Linux), so connected clients get real internet access, not just reachability to the server
 
 ## Workspace
 
@@ -227,10 +228,9 @@ cargo fmt --all -- --check
 
 ## Current limitations
 
-- Client and server addresses are hard-coded to localhost.
 - Only IPv4 packets are routed; IPv6 and roaming are advertised by the client but not negotiated by the server.
-- The DNS capability bit is negotiated, but DNS configuration is not implemented.
-- Internet forwarding, routing rules, and NAT are not configured automatically.
+- The DNS capability bit is negotiated, but DNS configuration is not implemented — the client still uses whatever DNS servers it had before connecting.
+- Full-tunnel routing (`payphone_tun::routing`) is only implemented for macOS and Linux; other platforms only reach 10.77.0.0/24.
 - `Rekey` and protocol-level `Close` are defined but not implemented.
 - Sessions and token revocations are stored only in memory.
 - Session sequence numbers are recorded but not currently enforced as an anti-replay mechanism.

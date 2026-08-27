@@ -2,6 +2,8 @@ use std::{io, net::Ipv4Addr, sync::Arc};
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+pub mod routing;
+
 /// IPv4 PAYPHONE network.
 ///
 /// 10.77.0.0/24

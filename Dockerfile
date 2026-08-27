@@ -24,6 +24,12 @@ RUN cargo build --release \
 # =============================================================
 FROM debian:bookworm-slim AS server
 
+# iptables: sets up NAT/MASQUERADE for the tunnel subnet so
+# clients get real internet access, not just reach the server.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iptables \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY --from=builder /build/target/release/payphone-server /usr/local/bin/payphone-server

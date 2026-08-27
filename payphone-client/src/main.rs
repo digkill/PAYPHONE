@@ -364,6 +364,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("PAYPHONE TUN created");
 
+    //
+    // Без этого через TUN идёт только трафик к 10.77.0.0/24 —
+    // весь остальной (браузер и т.д.) продолжает идти мимо VPN.
+    // Guard живёт до конца main() и восстанавливает исходную
+    // маршрутизацию при выходе (Ctrl+C, ошибка, паника).
+    //
+    let tun_name = tun.name()?;
+
+    let _full_tunnel =
+        match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
+            Ok(guard) => {
+                println!("Full-tunnel routing enabled (all traffic now goes through PAYPHONE)");
+
+                Some(guard)
+            }
+
+            Err(error) => {
+                eprintln!(
+                    "Could not enable full-tunnel routing ({error}); \
+                 only 10.77.0.0/24 will go through the VPN"
+                );
+
+                None
+            }
+        };
+
     println!("Try: ping 10.77.0.1");
 
     //

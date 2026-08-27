@@ -110,6 +110,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PAYPHONE server TUN: 10.77.0.1/24");
 
     //
+    // Без этого пакеты доходят до TUN сервера, но дальше в
+    // интернет не пересылаются — клиент подключится, но
+    // реального доступа наружу не получит.
+    //
+    payphone_tun::routing::enable_server_forwarding(payphone_tun::routing::PAYPHONE_SUBNET_CIDR)?;
+
+    println!("PAYPHONE server forwarding/NAT enabled for 10.77.0.0/24");
+
+    //
     // =========================================================
     // SESSIONS
     // =========================================================
