@@ -163,7 +163,8 @@ obfuscation layer (`payphone_transport::obfuscation`) before it hits the
 network, and unwrapped on receive:
 
 ```text
-[ 8-byte random salt ][ payload XOR tiled SHA256(shared secret || salt) ]
+[ 8-byte random salt ][ XOR(tiled SHA256(shared secret || salt),
+                             [2-byte length][real payload][random padding]) ]
 ```
 
 This is not encryption — QUIC's own TLS 1.3 already provides
@@ -177,11 +178,51 @@ blocklist it. A datagram that doesn't decode with the shared secret is
 silently dropped before it ever reaches the QUIC layer, so a probe that
 doesn't know the secret gets no response at all.
 
+The wire length is rounded up to one of a handful of fixed buckets (see
+`PADDING_BUCKETS` in `obfuscation.rs`) instead of exactly tracking the real
+QUIC datagram size, and the client's keepalive `PING` fires at a jittered
+interval instead of a fixed one — both aimed at the traffic-shape signals
+below, not at the byte-level signature.
+
 Both sides must be configured with the same secret via `PAYPHONE_OBFS_PSK`
 (see `.env.example`). There is no built-in default — the process refuses
-to start without it, since a secret compiled into open-source code
-provides no real protection against an adversary who can read the
-source.
+to start without it, and refuses to start with the literal placeholder
+value from `.env.example` or anything under 16 characters, since a secret
+compiled into open-source code (or left as the documented placeholder)
+provides no real protection against an adversary who can read the source.
+
+### What this does *not* hide
+
+Obfuscation defeats passive QUIC-signature matching and blind active
+probing. It does **not** make a PAYPHONE connection indistinguishable from
+ordinary traffic under traffic-shape analysis — a DPI system like Russia's
+TSPU doesn't need to identify the protocol by name to block it, only to
+classify the flow as "probably a VPN tunnel":
+
+- **Fixed, non-standard port.** A sustained encrypted UDP flow to
+  `40404` is itself a signal — nothing legitimate commonly runs there.
+- **Packet-length clustering.** Even with bucketed padding, QUIC's own
+  packetization still produces a fairly small set of recurring sizes
+  (handshake/MTU-probe near the MTU ceiling, small ACK-only packets,
+  etc.) — real HTTP/3 traffic from major CDNs has its own, different
+  size distribution that this project doesn't currently mimic.
+- **One long-lived flow.** Full-tunnel routing means all of a client's
+  traffic rides one UDP 4-tuple for the session's duration — a classic
+  VPN traffic shape regardless of what the bytes look like.
+- **Selective silence.** A server that answers only holders of the
+  shared secret and stays silent to everyone else is itself a
+  distinguishing behavior (a public HTTP/3 server responds to anyone).
+- **No authentication in the obfuscation layer.** A wrong-secret
+  datagram of ordinary length still gets XOR'd into *something* and
+  handed to `quinn`, which discards it as malformed QUIC — functionally
+  fine, but the obfuscation layer itself can't distinguish "wrong
+  secret" from "valid but unparseable," only QUIC's own parsing can.
+
+Getting past this class of detection reliably needs a different transport
+model entirely — e.g. tunneling inside a real TLS session on port 443
+that mimics (or proxies) an actual popular site's handshake, the way
+REALITY/Xray-style tools do. That's a materially larger undertaking than
+this obfuscation layer and isn't implemented here.
 
 ## Protocol overview
 

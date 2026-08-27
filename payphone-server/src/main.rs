@@ -65,6 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PAYPHONE_OBFS_PSK is not set; generate a secret and set it identically on client and server"
     })?;
 
+    payphone_transport::obfuscation::validate_passphrase(&obfuscation_passphrase)?;
+
     let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
 
     //

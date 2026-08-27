@@ -30,3 +30,10 @@ tokio = {
     ]
 }
 dotenvy = "0.15.7"
+
+rand_core = {
+    version = "0.9",
+    features = [
+        "os_rng"
+    ]
+}

@@ -933,6 +933,7 @@ dependencies = [
  "payphone-transport",
  "payphone-tun",
  "quinn",
+ "rand_core 0.9.5",
  "tokio",
 ]
 

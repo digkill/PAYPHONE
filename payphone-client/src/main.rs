@@ -40,7 +40,16 @@ const CLIENT_CAPABILITIES: u32 = CAP_IPV4 | CAP_IPV6 | CAP_DNS | CAP_RESUME | CA
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-const PING_INTERVAL: Duration = Duration::from_secs(10);
+//
+// Джиттер keepalive: строго периодический PING (было ровно 10с)
+// сам по себе почти подпись для DPI на простое соединение —
+// мелкий пакет через фиксированный интервал, PONG в ответ.
+// Реальный интервал каждый раз случаен в [PING_INTERVAL_MIN,
+// PING_INTERVAL_MIN + PING_INTERVAL_JITTER).
+//
+const PING_INTERVAL_MIN: Duration = Duration::from_secs(7);
+
+const PING_INTERVAL_JITTER: Duration = Duration::from_secs(7);
 
 const SESSION_FILE: &str = ".payphone-session";
 
@@ -249,6 +258,29 @@ async fn create_new_session(
 }
 
 // =============================================================
+// KEEPALIVE JITTER
+// =============================================================
+
+fn random_ping_interval() -> Duration {
+    use rand_core::{OsRng, TryRngCore};
+
+    let mut jitter_bytes = [0u8; 2];
+
+    //
+    // OsRng не должен падать в нормальных условиях; при сбое
+    // просто используем минимальный интервал без джиттера —
+    // это не security-критичный путь.
+    //
+    let _ = OsRng.try_fill_bytes(&mut jitter_bytes);
+
+    let jitter_fraction = u16::from_be_bytes(jitter_bytes) as u64;
+
+    let jitter = PING_INTERVAL_JITTER.as_millis() as u64 * jitter_fraction / u16::MAX as u64;
+
+    PING_INTERVAL_MIN + Duration::from_millis(jitter)
+}
+
+// =============================================================
 // MAIN
 // =============================================================
 
@@ -298,6 +330,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(
         |_| "PAYPHONE_OBFS_PSK is not set; use the same secret configured on the server",
     )?;
+
+    payphone_transport::obfuscation::validate_passphrase(&obfuscation_passphrase)?;
 
     let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
 
@@ -414,10 +448,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_sequence: u64 = 10;
 
     let mut ping_id: u64 = 1;
-
-    let mut ping_timer = time::interval(PING_INTERVAL);
-
-    ping_timer.tick().await;
 
     let mut flow = matrix::FlowIndicator::new();
 
@@ -589,8 +619,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // KEEPALIVE
             // ---------------------------------------------
             //
+            //
+            // Пересоздаётся заново на каждой итерации loop —
+            // именно за счёт этого интервал каждый раз новый,
+            // без ручного управления состоянием таймера.
+            //
             _ =
-                ping_timer.tick()
+                time::sleep(random_ping_interval())
             => {
                 let ping =
                     Ping::new(
