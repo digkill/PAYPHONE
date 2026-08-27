@@ -9,13 +9,22 @@
 # Env vars (PAYPHONE_BIND_ADDR, PAYPHONE_OBFS_PSK, PAYPHONE_DEV_MODE)
 # are injected by Coolify's own application environment settings,
 # not hardcoded here.
+#
+# Host port defaults to 443 (same port real HTTP/3 uses) rather than
+# a random high port, per the anti-fingerprinting plan: a sustained
+# encrypted UDP flow to a non-standard port is itself a signal. The
+# container keeps binding its usual internal 40404 (PAYPHONE_BIND_ADDR)
+# — only the externally visible host port changes. This needs a host
+# with nothing else already publishing 443/udp (e.g. Coolify's own
+# Traefik proxy claims it by default for HTTP/3 — stop or reconfigure
+# that first if it's in the way).
 services:
   payphone-server:
     build:
       context: .
       target: server
     ports:
-      - "40404:40404/udp"
+      - "${PAYPHONE_HOST_PORT:-443}:40404/udp"
     cap_add:
       - NET_ADMIN
     devices:
