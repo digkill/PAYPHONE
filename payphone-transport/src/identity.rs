@@ -48,7 +48,9 @@ pub fn ensure_dev_identity() -> Result<(), Box<dyn std::error::Error>> {
     // в cert/key файл параллельно и
     // повредить его содержимое.
     //
-    let _guard = generation_lock().lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = generation_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
     //
     // Если оба файла уже существуют,

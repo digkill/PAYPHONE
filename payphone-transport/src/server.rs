@@ -1,10 +1,14 @@
-use std::{fs, net::SocketAddr};
+use std::{fs, net::SocketAddr, sync::Arc};
 
-use quinn::{Endpoint, ServerConfig};
+use quinn::{Endpoint, EndpointConfig, ServerConfig, default_runtime};
 
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
-use crate::identity::{CERT_PATH, KEY_PATH, ensure_dev_identity};
+use crate::{
+    identity::{CERT_PATH, KEY_PATH, ensure_dev_identity},
+    obfuscated_socket::ObfuscatedSocket,
+    obfuscation::ObfuscationKey,
+};
 
 /// Создаёт QUIC endpoint PAYPHONE server.
 ///
@@ -15,7 +19,13 @@ use crate::identity::{CERT_PATH, KEY_PATH, ensure_dev_identity};
 /// UDP socket
 /// QUIC state
 /// TLS state
-pub fn create_server_endpoint(address: SocketAddr) -> Result<Endpoint, Box<dyn std::error::Error>> {
+///
+/// `obfuscation_key` должен быть одинаковым
+/// на сервере и на клиенте — см. `payphone_transport::obfuscation`.
+pub fn create_server_endpoint(
+    address: SocketAddr,
+    obfuscation_key: ObfuscationKey,
+) -> Result<Endpoint, Box<dyn std::error::Error>> {
     //
     // Сначала гарантируем,
     // что certificate/key существуют.
@@ -50,9 +60,24 @@ pub fn create_server_endpoint(address: SocketAddr) -> Result<Endpoint, Box<dyn s
     let server_config = ServerConfig::with_single_cert(vec![certificate], private_key.into())?;
 
     //
-    // Создаём серверный Endpoint.
+    // Сами биндим UDP socket и оборачиваем его в ObfuscatedSocket,
+    // чтобы прозрачно для quinn обфусцировать каждую датаграмму.
     //
-    let endpoint = Endpoint::server(server_config, address)?;
+    let socket = std::net::UdpSocket::bind(address)?;
+
+    let runtime = default_runtime()
+        .ok_or_else(|| "no async runtime found for PAYPHONE QUIC endpoint".to_string())?;
+
+    let async_socket = runtime.wrap_udp_socket(socket)?;
+
+    let obfuscated_socket = Arc::new(ObfuscatedSocket::new(async_socket, obfuscation_key));
+
+    let endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        Some(server_config),
+        obfuscated_socket,
+        runtime,
+    )?;
 
     Ok(endpoint)
 }

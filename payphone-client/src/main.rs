@@ -22,7 +22,9 @@ use payphone_core::{
     whats_up_dude::{CAP_DNS, CAP_IPV4, CAP_IPV6, CAP_RESUME, CAP_ROAMING, WhatsUpDude},
 };
 
-use payphone_transport::{client::create_client_endpoint, identity::SERVER_NAME};
+use payphone_transport::{
+    client::create_client_endpoint, identity::SERVER_NAME, obfuscation::ObfuscationKey,
+};
 
 use payphone_tun::{PAYPHONE_MTU, create_client_tun};
 
@@ -273,16 +275,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_address: SocketAddr = server_addr_setting
         .to_socket_addrs()
-        .map_err(|error| format!("cannot resolve PAYPHONE_SERVER_ADDR {}: {}", server_addr_setting, error))?
+        .map_err(|error| {
+            format!(
+                "cannot resolve PAYPHONE_SERVER_ADDR {}: {}",
+                server_addr_setting, error
+            )
+        })?
         .next()
-        .ok_or_else(|| format!("PAYPHONE_SERVER_ADDR {} resolved to no address", server_addr_setting))?;
+        .ok_or_else(|| {
+            format!(
+                "PAYPHONE_SERVER_ADDR {} resolved to no address",
+                server_addr_setting
+            )
+        })?;
+
+    //
+    // Тот же общий пароль обфускации, что и на сервере —
+    // см. payphone_transport::obfuscation.
+    //
+    let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(
+        |_| "PAYPHONE_OBFS_PSK is not set; use the same secret configured on the server",
+    )?;
+
+    let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
 
     println!("PAYPHONE VPN client");
 
     //
     // QUIC/TLS.
     //
-    let endpoint = create_client_endpoint()?;
+    let endpoint = create_client_endpoint(obfuscation_key)?;
 
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 

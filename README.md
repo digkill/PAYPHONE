@@ -141,6 +141,33 @@ Available plans currently encode these claims:
 
 Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. Device and bandwidth limits are recorded but not enforced yet.
 
+## Wire obfuscation
+
+Every UDP datagram sent by the client or server is wrapped in a lightweight
+obfuscation layer (`payphone_transport::obfuscation`) before it hits the
+network, and unwrapped on receive:
+
+```text
+[ 8-byte random salt ][ payload XOR tiled SHA256(shared secret || salt) ]
+```
+
+This is not encryption — QUIC's own TLS 1.3 already provides
+confidentiality and integrity. Its only job is to stop PAYPHONE datagrams
+from looking like QUIC on the wire, since QUIC's handshake has a
+recognizable byte signature (long header form, version field) regardless
+of port. This matters because some DPI middleboxes not only match that
+signature passively, but actively probe suspected VPN endpoints — dialing
+the IP:port themselves and completing a QUIC handshake to confirm and
+blocklist it. A datagram that doesn't decode with the shared secret is
+silently dropped before it ever reaches the QUIC layer, so a probe that
+doesn't know the secret gets no response at all.
+
+Both sides must be configured with the same secret via `PAYPHONE_OBFS_PSK`
+(see `.env.example`). There is no built-in default — the process refuses
+to start without it, since a secret compiled into open-source code
+provides no real protection against an adversary who can read the
+source.
+
 ## Protocol overview
 
 Every PAYPHONE message is carried in a QUIC datagram and starts with a 16-byte header:

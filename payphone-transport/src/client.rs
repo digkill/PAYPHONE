@@ -4,14 +4,21 @@ use std::{
     sync::Arc,
 };
 
-use quinn::{ClientConfig, Endpoint};
+use quinn::{ClientConfig, Endpoint, EndpointConfig, default_runtime};
 
 use rustls::{RootCertStore, pki_types::CertificateDer};
 
-use crate::identity::CERT_PATH;
+use crate::{
+    identity::CERT_PATH, obfuscated_socket::ObfuscatedSocket, obfuscation::ObfuscationKey,
+};
 
 /// Создаёт PAYPHONE QUIC client endpoint.
-pub fn create_client_endpoint() -> Result<Endpoint, Box<dyn std::error::Error>> {
+///
+/// `obfuscation_key` должен быть одинаковым
+/// на клиенте и на сервере — см. `payphone_transport::obfuscation`.
+pub fn create_client_endpoint(
+    obfuscation_key: ObfuscationKey,
+) -> Result<Endpoint, Box<dyn std::error::Error>> {
     //
     // Читаем certificate PAYPHONE server.
     //
@@ -48,7 +55,25 @@ pub fn create_client_endpoint() -> Result<Endpoint, Box<dyn std::error::Error>> 
     //
     let bind_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
-    let mut endpoint = Endpoint::client(bind_address)?;
+    //
+    // Сами биндим UDP socket и оборачиваем его в ObfuscatedSocket —
+    // симметрично серверной стороне.
+    //
+    let socket = std::net::UdpSocket::bind(bind_address)?;
+
+    let runtime = default_runtime()
+        .ok_or_else(|| "no async runtime found for PAYPHONE QUIC endpoint".to_string())?;
+
+    let async_socket = runtime.wrap_udp_socket(socket)?;
+
+    let obfuscated_socket = Arc::new(ObfuscatedSocket::new(async_socket, obfuscation_key));
+
+    let mut endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        obfuscated_socket,
+        runtime,
+    )?;
 
     endpoint.set_default_client_config(client_config);
 

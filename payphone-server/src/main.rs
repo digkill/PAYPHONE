@@ -16,7 +16,7 @@ use payphone_auth::{MemoryRevocationStore, SubscriptionVerifier, VerificationKey
 
 use payphone_core::{DEFAULT_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data};
 
-use payphone_transport::server::create_server_endpoint;
+use payphone_transport::{obfuscation::ObfuscationKey, server::create_server_endpoint};
 
 use payphone_tun::{create_server_tun, ipv4_destination};
 
@@ -55,12 +55,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("invalid PAYPHONE_BIND_ADDR {}: {}", bind_addr, error))?;
 
     //
+    // Общий пароль для обфускации UDP-пакетов (см.
+    // payphone_transport::obfuscation). Обязателен: без него
+    // сервер и клиент не понимают друг друга на проводе, и
+    // публичный дефолт в коде свёл бы защиту от DPI-пробинга
+    // к нулю для любого, кто читает исходники.
+    //
+    let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(|_| {
+        "PAYPHONE_OBFS_PSK is not set; generate a secret and set it identically on client and server"
+    })?;
+
+    let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
+
+    //
     // =========================================================
     // QUIC
     // =========================================================
     //
 
-    let endpoint = create_server_endpoint(address)?;
+    let endpoint = create_server_endpoint(address, obfuscation_key)?;
 
     println!("PAYPHONE server: {}", address);
 
