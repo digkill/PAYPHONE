@@ -915,7 +915,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "payphone-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "ed25519-dalek",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "dotenvy",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "rand 0.9.5",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "dotenvy",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-token"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "payphone-auth",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "libc",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "payphone-tun"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tun-rs",
 ]
