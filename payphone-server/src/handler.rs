@@ -5,7 +5,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use quinn::Connection;
 
 use tokio::sync::RwLock;
 
@@ -23,14 +22,16 @@ use payphone_core::{
 
 use payphone_tun::{PAYPHONE_MTU, SharedTun, ipv4_source};
 
-use crate::session::SessionManager;
+use crate::session::{ClientLink, SessionManager};
 
 const SERVER_CAPABILITIES: u32 = CAP_IPV4 | CAP_DNS | CAP_RESUME;
 
 pub type PayphoneVerifier = SubscriptionVerifier<MemoryRevocationStore>;
 
-pub async fn handle_packet(
-    connection: Connection,
+pub async fn handle_frame(
+    link: ClientLink,
+
+    client_address: SocketAddr,
 
     sessions: Arc<RwLock<SessionManager>>,
 
@@ -38,26 +39,15 @@ pub async fn handle_packet(
 
     tun: SharedTun,
 
-    packet: Bytes,
+    frame: Frame,
 ) {
-    let client_address = connection.remote_address();
-    let frame = match Frame::decode(packet) {
-        Ok(frame) => frame,
-
-        Err(error) => {
-            eprintln!("Invalid PAYPHONE frame: {}", error);
-
-            return;
-        }
-    };
-
     match frame.frame_type {
         FrameType::WhatsUpDude => {
-            handle_whats_up_dude(connection, sessions, verifier, client_address, frame).await;
+            handle_whats_up_dude(link, sessions, verifier, client_address, frame).await;
         }
 
         FrameType::BackAgainDude => {
-            handle_back_again_dude(connection, sessions, client_address, frame).await;
+            handle_back_again_dude(link, sessions, client_address, frame).await;
         }
 
         FrameType::Data => {
@@ -65,7 +55,7 @@ pub async fn handle_packet(
         }
 
         FrameType::Ping => {
-            handle_ping(connection, sessions, client_address, frame).await;
+            handle_ping(link, sessions, client_address, frame).await;
         }
 
         FrameType::Pong
@@ -81,12 +71,42 @@ pub async fn handle_packet(
     }
 }
 
-// =============================================================
-// HANDSHAKE
-// =============================================================
+pub async fn handle_packet(
+    connection: quinn::Connection,
+
+    sessions: Arc<RwLock<SessionManager>>,
+
+    verifier: Arc<PayphoneVerifier>,
+
+    tun: SharedTun,
+
+    packet: Bytes,
+) {
+    let client_address = connection.remote_address();
+
+    let frame = match Frame::decode(packet) {
+        Ok(frame) => frame,
+
+        Err(error) => {
+            eprintln!("Invalid PAYPHONE frame: {}", error);
+
+            return;
+        }
+    };
+
+    handle_frame(
+        ClientLink::Quic(connection),
+        client_address,
+        sessions,
+        verifier,
+        tun,
+        frame,
+    )
+    .await;
+}
 
 async fn handle_whats_up_dude(
-    connection: Connection,
+    link: ClientLink,
 
     sessions: Arc<RwLock<SessionManager>>,
 
@@ -112,7 +132,7 @@ async fn handle_whats_up_dude(
         Ok(token) => token,
 
         Err(_) => {
-            send_access_denied(&connection, sequence, DenyReason::InvalidToken, 0).await;
+            send_access_denied(&link, sequence, DenyReason::InvalidToken, 0).await;
 
             return;
         }
@@ -124,7 +144,7 @@ async fn handle_whats_up_dude(
         Err(error) => {
             let (reason, expires_at) = auth_error_to_deny(&error, token.claims.expires_at);
 
-            send_access_denied(&connection, sequence, reason, expires_at).await;
+            send_access_denied(&link, sequence, reason, expires_at).await;
 
             return;
         }
@@ -139,7 +159,7 @@ async fn handle_whats_up_dude(
 
         manager.create_session(
             client_address,
-            connection.clone(),
+            link.clone(),
             capabilities,
             whats_up.client_nonce,
             sequence,
@@ -160,7 +180,7 @@ async fn handle_whats_up_dude(
         payload: all_good.encode(),
     };
 
-    let _ = connection.send_datagram_wait(response.encode()).await;
+    link.send(response.encode()).await;
 
     println!(
         "Session {}.{}.{}.{} created",
@@ -171,12 +191,8 @@ async fn handle_whats_up_dude(
     );
 }
 
-// =============================================================
-// RESUME
-// =============================================================
-
 async fn handle_back_again_dude(
-    connection: Connection,
+    link: ClientLink,
 
     sessions: Arc<RwLock<SessionManager>>,
 
@@ -192,10 +208,6 @@ async fn handle_back_again_dude(
         Err(_) => return,
     };
 
-    //
-    // Проверяем срок подписки
-    // ПЕРЕД resume.
-    //
     let expired = {
         let manager = sessions.read().await;
 
@@ -207,7 +219,7 @@ async fn handle_back_again_dude(
     };
 
     if expired {
-        send_access_denied(&connection, sequence, DenyReason::SubscriptionExpired, 0).await;
+        send_access_denied(&link, sequence, DenyReason::SubscriptionExpired, 0).await;
 
         return;
     }
@@ -219,7 +231,7 @@ async fn handle_back_again_dude(
             &message.session_id,
             &message.resume_token,
             client_address,
-            connection.clone(),
+            link.clone(),
             sequence,
             PAYPHONE_MTU,
         )
@@ -241,12 +253,8 @@ async fn handle_back_again_dude(
         payload: still_good.encode(),
     };
 
-    let _ = connection.send_datagram_wait(response.encode()).await;
+    link.send(response.encode()).await;
 }
-
-// =============================================================
-// DATA -> TUN
-// =============================================================
 
 async fn handle_data(
     sessions: Arc<RwLock<SessionManager>>,
@@ -282,13 +290,6 @@ async fn handle_data(
             return;
         }
 
-        //
-        // Защита:
-        //
-        // клиент с VPN IP 10.77.0.2
-        // не должен подсовывать packet
-        // с source 10.77.0.55.
-        //
         if let Some(source) = ipv4_source(&data.payload) {
             if source != session.ipv4 {
                 eprintln!("Spoofed VPN source address");
@@ -304,21 +305,13 @@ async fn handle_data(
         return;
     }
 
-    //
-    // Настоящий IP packet
-    // инжектируется в Linux kernel.
-    //
     if let Err(error) = tun.send(&data.payload).await {
         eprintln!("TUN write error: {}", error);
     }
 }
 
-// =============================================================
-// PING
-// =============================================================
-
 async fn handle_ping(
-    connection: Connection,
+    link: ClientLink,
 
     sessions: Arc<RwLock<SessionManager>>,
 
@@ -364,15 +357,11 @@ async fn handle_ping(
         payload: pong.encode(),
     };
 
-    let _ = payphone_transport::send_vpn_datagram(&connection, frame.encode());
+    link.send(frame.encode()).await;
 }
 
-// =============================================================
-// DENIED
-// =============================================================
-
 async fn send_access_denied(
-    connection: &Connection,
+    link: &ClientLink,
 
     sequence: u64,
 
@@ -394,7 +383,7 @@ async fn send_access_denied(
         payload: denied.encode(),
     };
 
-    let _ = connection.send_datagram_wait(frame.encode()).await;
+    link.send(frame.encode()).await;
 }
 
 fn auth_error_to_deny(error: &AuthError, expires_at: u64) -> (DenyReason, u64) {

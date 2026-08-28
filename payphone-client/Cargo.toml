@@ -26,7 +26,8 @@ tokio = {
         "macros",
         "net",
         "time",
-        "signal"
+        "signal",
+        "sync"
     ]
 }
 dotenvy = "0.15.7"

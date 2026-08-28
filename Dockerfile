@@ -39,6 +39,7 @@ COPY --from=builder /build/target/release/payphone-server /usr/local/bin/payphon
 COPY auth-keys/subscription-public.key ./auth-keys/subscription-public.key
 
 EXPOSE 40404/udp
+EXPOSE 40443/tcp
 
 ENTRYPOINT ["/usr/local/bin/payphone-server"]
 

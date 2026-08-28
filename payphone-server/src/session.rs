@@ -4,7 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use quinn::Connection;
+use tokio::sync::mpsc;
 
 use payphone_auth::{CLIENT_ID_SIZE, SubscriptionClaims, SubscriptionPlan, TOKEN_ID_SIZE};
 
@@ -17,6 +19,45 @@ pub type SessionId = [u8; SESSION_ID_SIZE];
 
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Clone, Debug)]
+pub enum ClientLink {
+    Quic(Connection),
+
+    Stream {
+        id: u64,
+
+        tx: mpsc::Sender<Bytes>,
+    },
+}
+
+impl ClientLink {
+    pub async fn send(&self, bytes: Bytes) {
+        match self {
+            Self::Quic(connection) => {
+                let _ = payphone_transport::send_vpn_datagram(connection, bytes);
+            }
+
+            Self::Stream { tx, .. } => {
+                let _ = tx.send(bytes).await;
+            }
+        }
+    }
+
+    fn matches_quic_stable_id(&self, stable_id: usize) -> bool {
+        match self {
+            Self::Quic(connection) => connection.stable_id() == stable_id,
+            Self::Stream { .. } => false,
+        }
+    }
+
+    fn matches_stream_id(&self, stream_id: u64) -> bool {
+        match self {
+            Self::Stream { id, .. } => *id == stream_id,
+            Self::Quic(_) => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Session {
     pub id: SessionId,
@@ -25,11 +66,7 @@ pub struct Session {
 
     pub client_address: SocketAddr,
 
-    //
-    // Текущее QUIC connection
-    // для этой логической Session.
-    //
-    pub connection: Connection,
+    pub link: ClientLink,
 
     pub capabilities: u32,
 
@@ -72,7 +109,7 @@ impl SessionManager {
 
         client_address: SocketAddr,
 
-        connection: Connection,
+        link: ClientLink,
 
         capabilities: u32,
 
@@ -103,7 +140,7 @@ impl SessionManager {
 
             client_address,
 
-            connection,
+            link,
 
             capabilities,
 
@@ -140,7 +177,7 @@ impl SessionManager {
 
         new_client_address: SocketAddr,
 
-        new_connection: Connection,
+        new_link: ClientLink,
 
         sequence: u64,
 
@@ -154,10 +191,7 @@ impl SessionManager {
 
         session.client_address = new_client_address;
 
-        //
-        // Главное для QUIC resume.
-        //
-        session.connection = new_connection;
+        session.link = new_link;
 
         session.last_sequence = sequence;
 
@@ -187,23 +221,20 @@ impl SessionManager {
         let before = self.sessions.len();
 
         self.sessions
-            .retain(|_id, session| session.connection.stable_id() != stable_id);
+            .retain(|_id, session| !session.link.matches_quic_stable_id(stable_id));
 
         before - self.sessions.len()
     }
 
-    /// Находит Session
-    /// по внутреннему VPN IPv4.
-    ///
-    /// Нужен для:
-    ///
-    /// Linux TUN
-    ///     ↓
-    /// destination 10.77.0.2
-    ///     ↓
-    /// Session
-    ///     ↓
-    /// QUIC Connection
+    pub fn remove_by_stream_id(&mut self, stream_id: u64) -> usize {
+        let before = self.sessions.len();
+
+        self.sessions
+            .retain(|_id, session| !session.link.matches_stream_id(stream_id));
+
+        before - self.sessions.len()
+    }
+
     pub fn find_by_ipv4(&self, ipv4: [u8; 4]) -> Option<&Session> {
         self.sessions.values().find(|session| session.ipv4 == ipv4)
     }

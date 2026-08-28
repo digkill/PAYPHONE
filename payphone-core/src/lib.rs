@@ -28,6 +28,13 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// Стандартный порт PAYPHONE server.
 pub const DEFAULT_PORT: u16 = 40404;
 
+/// TCP listen port for the HTTPS camouflage front (browsers get a
+/// landing page; PAYPHONE clients speak frames after TLS).
+///
+/// Distinct from `DEFAULT_PORT` so a container can bind QUIC on
+/// 40404/udp and TLS on 40443/tcp while the host publishes both as 443.
+pub const DEFAULT_TCP_PORT: u16 = 40443;
+
 /// Размер фиксированного заголовка PAYPHONE Frame.
 ///
 /// version      = 1 byte
@@ -432,12 +439,33 @@ impl Frame {
         })
     }
 
-    /// Удобный вариант decode
-    /// для обычного &[u8].
+    /// Payload length from a complete 16-byte header, for stream
+    /// transports that read header then body separately.
+    pub fn payload_len_from_header(header: &[u8]) -> Result<usize, FrameError> {
+        if header.len() < HEADER_SIZE {
+            return Err(FrameError::TooSmall);
+        }
+
+        if header[0] != PROTOCOL_VERSION {
+            return Err(FrameError::UnsupportedVersion(header[0]));
+        }
+
+        let payload_len = u32::from_be_bytes(
+            header[4..8]
+                .try_into()
+                .expect("slice is 4 bytes"),
+        ) as usize;
+
+        if payload_len > MAX_PAYLOAD_SIZE {
+            return Err(FrameError::PayloadTooLarge);
+        }
+
+        Ok(payload_len)
+    }
+
+    /// Удобный вариант decode для обычного `&[u8]`.
     ///
-    /// Старый UDP transport
-    /// использовал этот метод.
-    ///
+    /// Старый UDP transport использовал этот метод.
     /// Он также удобен в тестах.
     pub fn decode_slice(data: &[u8]) -> Result<Self, FrameError> {
         Self::decode(Bytes::copy_from_slice(data))
@@ -486,6 +514,11 @@ mod tests {
         // Frame -> bytes.
         //
         let encoded = original.encode();
+
+        assert_eq!(
+            Frame::payload_len_from_header(&encoded[..HEADER_SIZE]).expect("header"),
+            original.payload.len()
+        );
 
         //
         // bytes -> Frame.

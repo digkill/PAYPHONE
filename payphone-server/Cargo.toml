@@ -38,7 +38,9 @@ tokio = {
         "net",
         "time",
         "signal",
-        "sync"
+        "sync",
+        "io-util"
     ]
 }
 dotenvy = "0.15.7"
+tokio-rustls = "0.26"

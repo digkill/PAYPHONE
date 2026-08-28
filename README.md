@@ -116,7 +116,7 @@ To force a new authenticated handshake, delete `.payphone-session` before starti
 
 The `Dockerfile` builds `server`, `client`, and `token` images from the same multi-stage build. Locally, `docker-compose.yml` runs server + client + a one-off token issuer together.
 
-For a **remote server deployment** (e.g. behind a PaaS like Coolify), use `docker-compose.server.yml` instead of a platform's generic "port mapping" UI/API field. Many such tools default to TCP-only port publishing and either reject a `/udp` suffix outright or silently drop it — `docker ps` then shows the port as merely *exposed*, not actually published (`40404/udp` instead of `0.0.0.0:40404->40404/udp`), and UDP datagrams die at the host's network interface with zero visibility into why. A native Compose `ports: - "40404:40404/udp"` entry doesn't have this problem. Set `PAYPHONE_BIND_ADDR`, `PAYPHONE_OBFS_PSK`, and `PAYPHONE_DEV_MODE` through the platform's own environment variable mechanism.
+For a **remote server deployment** (e.g. behind a PaaS like Coolify), use `docker-compose.server.yml` instead of a platform's generic "port mapping" UI/API field. Many such tools default to TCP-only port publishing and either reject a `/udp` suffix outright or silently drop it — `docker ps` then shows the port as merely *exposed*, not actually published (`40404/udp` instead of `0.0.0.0:40404->40404/udp`), and UDP datagrams die at the host's network interface with zero visibility into why. A native Compose `ports: - "40404:40404/udp"` entry doesn't have this problem. The same file also publishes `443/tcp` → container `40443` for the HTTPS camouflage front. Set `PAYPHONE_BIND_ADDR`, `PAYPHONE_OBFS_PSK`, and `PAYPHONE_DEV_MODE` through the platform's own environment variable mechanism. Do not put PAYPHONE TCP/UDP 443 on a host that still has Traefik (or another proxy) bound to 443.
 
 Because the server's self-signed dev certificate regenerates on every redeploy (it isn't persisted across container restarts), the client's pinned `dev-certs/payphone-cert.der` needs updating after each redeploy. The server logs its own certificate as hex on startup for exactly this purpose — copy that value into the client's `dev-certs/payphone-cert.der`:
 
@@ -219,14 +219,26 @@ classify the flow as "probably a VPN tunnel":
   secret" from "valid but unparseable," only QUIC's own parsing can.
 
 Getting past this class of detection reliably needs a different transport
-model entirely — e.g. tunneling inside a real TLS session on port 443
-that mimics (or proxies) an actual popular site's handshake, the way
-REALITY/Xray-style tools do. That's a materially larger undertaking than
-this obfuscation layer and isn't implemented here.
+model — tunneling inside TLS on port 443 that looks like a real website
+to scanners, then (later) mimicking a popular site's handshake the way
+REALITY/Xray-style tools do.
+
+PAYPHONE already speaks **two** transports on the same host:
+
+- **UDP 443** — obfuscated QUIC (the default client path).
+- **TCP 443** — ordinary TLS 1.3 with ALPN `http/1.1`. A browser or
+  probe that `GET`s the port receives a small landing page. A PAYPHONE
+  client (`PAYPHONE_TRANSPORT=tls`) sends protocol frames on that same
+  TLS stream after the handshake.
+
+That is camouflage for "is anything listening on 443?", not a clone of
+Cloudflare's certificate/JA3. The TCP path does not use UDP obfuscation.
 
 ## Protocol overview
 
-Every PAYPHONE message is carried in a QUIC datagram and starts with a 16-byte header:
+Every PAYPHONE message is carried in a QUIC datagram (default) or as a
+length-prefixed TLS byte stream (`PAYPHONE_TRANSPORT=tls`). Both start
+with a 16-byte header:
 
 | Field | Size |
 | --- | ---: |

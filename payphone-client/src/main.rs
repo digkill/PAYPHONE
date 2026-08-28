@@ -8,27 +8,28 @@ use std::{
 use bytes::Bytes;
 use quinn::Connection;
 
-use tokio::{signal, time};
+use tokio::{sync::mpsc, time};
 
 use payphone_core::{
-    DEFAULT_PORT, Frame, FrameType, PROTOCOL_VERSION,
+    DEFAULT_PORT, DEFAULT_TCP_PORT, Frame, FrameType, PROTOCOL_VERSION,
     access_denied_dude::AccessDeniedDude,
     all_good_dude::{AllGoodDude, SERVER_NONCE_SIZE, SESSION_ID_SIZE},
     back_again_dude::BackAgainDude,
-    data::Data,
-    ping::Ping,
-    pong::Pong,
     still_good_dude::StillGoodDude,
     whats_up_dude::{CAP_DNS, CAP_IPV4, CAP_IPV6, CAP_RESUME, CAP_ROAMING, WhatsUpDude},
 };
 
 use payphone_transport::{
-    client::create_client_endpoint, identity::SERVER_NAME, obfuscation::ObfuscationKey,
+    client::create_client_endpoint,
+    https_front::{TlsClientSession, read_payphone_frame},
+    identity::SERVER_NAME,
+    obfuscation::ObfuscationKey,
 };
 
-use payphone_tun::{PAYPHONE_MTU, create_client_tun};
-
 mod matrix;
+mod tunnel;
+
+use tunnel::{QuicShutdown, VpnSink, run_tunnel};
 
 // =============================================================
 // CONFIG
@@ -66,7 +67,7 @@ struct SavedSession {
 }
 
 #[derive(Clone)]
-struct ActiveSession {
+pub(crate) struct ActiveSession {
     session_id: [u8; SESSION_ID_SIZE],
 
     assigned_ipv4: [u8; 4],
@@ -125,20 +126,84 @@ async fn receive_frame(connection: &Connection) -> Result<Frame, Box<dyn std::er
     Ok(Frame::decode(bytes)?)
 }
 
-fn send_frame(
-    connection: &Connection,
-    bytes: Bytes,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    payphone_transport::send_vpn_datagram(connection, bytes)
-        .map_err(|error| format!("QUIC connection lost: {error}").into())
+trait HandshakeIo {
+    async fn send_wait(&self, bytes: Bytes) -> Result<(), Box<dyn std::error::Error>>;
+
+    async fn read_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>>;
+}
+
+impl HandshakeIo for Connection {
+    async fn send_wait(&self, bytes: Bytes) -> Result<(), Box<dyn std::error::Error>> {
+        self.send_datagram_wait(bytes).await?;
+
+        Ok(())
+    }
+
+    async fn read_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>> {
+        receive_frame(self).await
+    }
+}
+
+impl HandshakeIo for TlsClientSession {
+    async fn send_wait(&self, bytes: Bytes) -> Result<(), Box<dyn std::error::Error>> {
+        self.send_frame_bytes(&bytes).await?;
+
+        Ok(())
+    }
+
+    async fn read_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error>> {
+        Ok(self.recv_frame().await?)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransportKind {
+    Quic,
+    Tls,
+}
+
+fn transport_kind() -> Result<TransportKind, Box<dyn std::error::Error>> {
+    let value = env::var("PAYPHONE_TRANSPORT").unwrap_or_else(|_| "quic".into());
+
+    match value.to_ascii_lowercase().as_str() {
+        "quic" | "udp" => Ok(TransportKind::Quic),
+
+        "tls" | "https" | "tcp" => Ok(TransportKind::Tls),
+
+        other => Err(format!("unknown PAYPHONE_TRANSPORT={other}; use quic or tls").into()),
+    }
+}
+
+fn resolve_server_addr(setting: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    setting
+        .to_socket_addrs()
+        .map_err(|error| {
+            format!("cannot resolve PAYPHONE_SERVER_ADDR {setting}: {error}")
+        })?
+        .next()
+        .ok_or_else(|| format!("PAYPHONE_SERVER_ADDR {setting} resolved to no address").into())
+}
+
+fn tls_connect_address(
+    quic_address: SocketAddr,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    if let Ok(setting) = env::var("PAYPHONE_TCP_SERVER_ADDR") {
+        return resolve_server_addr(&setting);
+    }
+
+    if quic_address.port() == DEFAULT_PORT {
+        Ok(SocketAddr::new(quic_address.ip(), DEFAULT_TCP_PORT))
+    } else {
+        Ok(quic_address)
+    }
 }
 
 // =============================================================
 // RESUME
 // =============================================================
 
-async fn try_resume(
-    connection: &Connection,
+async fn try_resume<I: HandshakeIo>(
+    io: &mut I,
 
     saved: SavedSession,
 ) -> Result<Option<ActiveSession>, Box<dyn std::error::Error>> {
@@ -158,17 +223,15 @@ async fn try_resume(
         payload: message.encode(),
     };
 
-    connection.send_datagram_wait(frame.encode()).await?;
+    io.send_wait(frame.encode()).await?;
 
-    let response = match time::timeout(Duration::from_secs(2), connection.read_datagram()).await {
-        Ok(Ok(bytes)) => bytes,
+    let frame = match time::timeout(Duration::from_secs(2), io.read_frame()).await {
+        Ok(Ok(frame)) => frame,
 
         _ => {
             return Ok(None);
         }
     };
-
-    let frame = Frame::decode(response)?;
 
     match frame.frame_type {
         FrameType::StillGoodDude => {
@@ -207,8 +270,8 @@ async fn try_resume(
 // NEW SESSION
 // =============================================================
 
-async fn create_new_session(
-    connection: &Connection,
+async fn create_new_session<I: HandshakeIo>(
+    io: &mut I,
 ) -> Result<ActiveSession, Box<dyn std::error::Error>> {
     //
     // Настоящий подписочный token.
@@ -232,9 +295,9 @@ async fn create_new_session(
 
     matrix::status("What's up, dude?");
 
-    connection.send_datagram_wait(frame.encode()).await?;
+    io.send_wait(frame.encode()).await?;
 
-    let response = receive_frame(connection).await?;
+    let response = time::timeout(RESPONSE_TIMEOUT, io.read_frame()).await??;
 
     let all_good = match response.frame_type {
         FrameType::AllGoodDude => AllGoodDude::decode(response.payload)?,
@@ -265,11 +328,37 @@ async fn create_new_session(
     })
 }
 
+async fn establish_session<I: HandshakeIo>(
+    io: &mut I,
+) -> Result<ActiveSession, Box<dyn std::error::Error>> {
+    if Path::new(SESSION_FILE).exists() {
+        match load_session() {
+            Some(saved) => match try_resume(io, saved).await? {
+                Some(session) => {
+                    matrix::status("PAYPHONE SESSION RESUMED");
+
+                    Ok(session)
+                }
+
+                None => {
+                    let _ = fs::remove_file(SESSION_FILE);
+
+                    create_new_session(io).await
+                }
+            },
+
+            None => create_new_session(io).await,
+        }
+    } else {
+        create_new_session(io).await
+    }
+}
+
 // =============================================================
 // KEEPALIVE JITTER
 // =============================================================
 
-fn random_ping_interval() -> Duration {
+pub(crate) fn random_ping_interval() -> Duration {
     use rand_core::{OsRng, TryRngCore};
 
     let mut jitter_bytes = [0u8; 2];
@@ -312,28 +401,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TLS-имя (SERVER_NAME) остаётся "localhost",
     // потому что dev-сертификат всегда выпущен на это имя.
     //
+    let transport = transport_kind()?;
+
     let server_addr_setting =
         env::var("PAYPHONE_SERVER_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", DEFAULT_PORT));
 
-    let server_address: SocketAddr = server_addr_setting
-        .to_socket_addrs()
-        .map_err(|error| {
-            format!(
-                "cannot resolve PAYPHONE_SERVER_ADDR {}: {}",
-                server_addr_setting, error
-            )
-        })?
-        .next()
-        .ok_or_else(|| {
-            format!(
-                "PAYPHONE_SERVER_ADDR {} resolved to no address",
-                server_addr_setting
-            )
-        })?;
+    let server_address = resolve_server_addr(&server_addr_setting)?;
 
     //
     // Тот же общий пароль обфускации, что и на сервере —
-    // см. payphone_transport::obfuscation.
+    // см. payphone_transport::obfuscation. TLS/HTTPS front does
+    // not XOR the TCP stream; the secret is still required so
+    // one .env works for both transports.
     //
     let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(
         |_| "PAYPHONE_OBFS_PSK is not set; use the same secret configured on the server",
@@ -351,42 +430,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     matrix::banner();
 
-    //
-    // QUIC/TLS.
-    //
-    let bind_iface = payphone_tun::routing::default_physical_interface();
+    let (active, sink, incoming, quic, tunnel_host) = match transport {
+        TransportKind::Quic => {
+            let bind_iface = payphone_tun::routing::default_physical_interface();
 
-    let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
+            let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
 
-    let endpoint = create_client_endpoint(obfuscation_key, dev_mode, bind_ip, bind_iface.as_deref())?;
+            let endpoint =
+                create_client_endpoint(obfuscation_key, dev_mode, bind_ip, bind_iface.as_deref())?;
 
-    let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
+            let mut connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 
-    matrix::status("QUIC + TLS 1.3 connected");
+            matrix::status("QUIC + TLS 1.3 connected");
 
-    //
-    // Resume или новый handshake.
-    //
-    let active = if Path::new(SESSION_FILE).exists() {
-        match load_session() {
-            Some(saved) => match try_resume(&connection, saved).await? {
-                Some(session) => {
-                    matrix::status("PAYPHONE SESSION RESUMED");
+            let active = establish_session(&mut connection).await?;
 
-                    session
+            let (tx, rx) = mpsc::channel(256);
+
+            let reader = connection.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    match reader.read_datagram().await {
+                        Ok(bytes) => {
+                            if let Ok(frame) = Frame::decode(bytes) {
+                                if tx.send(frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+
+                        Err(_) => break,
+                    }
                 }
+            });
 
-                None => {
-                    let _ = fs::remove_file(SESSION_FILE);
-
-                    create_new_session(&connection).await?
-                }
-            },
-
-            None => create_new_session(&connection).await?,
+            (
+                active,
+                VpnSink::Quic(connection.clone()),
+                rx,
+                Some(QuicShutdown {
+                    connection,
+                    endpoint,
+                }),
+                server_address,
+            )
         }
-    } else {
-        create_new_session(&connection).await?
+
+        TransportKind::Tls => {
+            let tls_address = tls_connect_address(server_address)?;
+
+            let mut session = TlsClientSession::connect(tls_address).await?;
+
+            matrix::status("TLS 1.3 connected (HTTPS front)");
+
+            let active = establish_session(&mut session).await?;
+
+            let (mut reader, writer) = session.into_split();
+
+            let (tx, rx) = mpsc::channel(256);
+
+            tokio::spawn(async move {
+                loop {
+                    match read_payphone_frame(&mut reader).await {
+                        Ok(frame) => {
+                            if tx.send(frame).await.is_err() {
+                                break;
+                            }
+                        }
+
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            (
+                active,
+                VpnSink::Tls(writer),
+                rx,
+                None,
+                tls_address,
+            )
+        }
     };
 
     matrix::status(&format!(
@@ -401,341 +526,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     matrix::status(&format!("Capabilities: {}", active.capabilities));
 
-    //
-    // =========================================================
-    // CREATE TUN
-    // =========================================================
-    //
-
-    let tun = create_client_tun(
-        active.assigned_ipv4,
-        if active.mtu == 0 {
-            PAYPHONE_MTU
-        } else {
-            active.mtu
-        },
-    )?;
-
-    matrix::status("PAYPHONE TUN created");
-
-    //
-    // Без этого через TUN идёт только трафик к 10.77.0.0/24 —
-    // весь остальной (браузер и т.д.) продолжает идти мимо VPN.
-    // Guard живёт до конца main() и восстанавливает исходную
-    // маршрутизацию при выходе (Ctrl+C, ошибка, паника).
-    //
-    let tun_name = tun.name()?;
-
-    let mut full_tunnel =
-        match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
-            Ok(guard) => {
-                matrix::status(
-                    "Full-tunnel routing enabled (all traffic now goes through PAYPHONE)",
-                );
-
-                matrix::tunnel_open_banner();
-
-                Some(guard)
-            }
-
-            Err(error) => {
-                eprintln!(
-                    "Could not enable full-tunnel routing ({error}); \
-                 only 10.77.0.0/24 will go through the VPN"
-                );
-
-                None
-            }
-        };
-
-    matrix::status("Try: ping 10.77.0.1");
-
-    //
-    // Buffer настоящего IP packet.
-    //
-    let mut tun_buffer = vec![0u8; 65535];
-
-    let mut packet_id: u64 = 1;
-
-    let mut frame_sequence: u64 = 10;
-
-    let mut ping_id: u64 = 1;
-
-    let mut flow = matrix::FlowIndicator::new();
-
-    //
-    // Persistent interval. `sleep(2s)` *inside* the loop was reset
-    // on every TUN/QUIC packet, so under real traffic the host-route
-    // watchdog never ran — exactly when macOS was wiping routes.
-    //
-    let mut route_watch = time::interval(Duration::from_millis(400));
-
-    route_watch.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    let mut rain_tick = time::interval(Duration::from_millis(50));
-
-    rain_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    //
-    // =========================================================
-    // VPN LOOP
-    // =========================================================
-    //
-
-    loop {
-        tokio::select! {
-
-            //
-            // ---------------------------------------------
-            // TUN -> PAYPHONE -> QUIC
-            // ---------------------------------------------
-            //
-            result =
-                tun.recv(
-                    &mut tun_buffer
-                )
-            => {
-                let size =
-                    result?;
-
-                if size == 0 {
-                    continue;
-                }
-
-                let payload =
-                    Bytes::copy_from_slice(
-                        &tun_buffer[
-                            ..size
-                        ]
-                    );
-
-                let data =
-                    Data::new(
-                        active.session_id,
-                        packet_id,
-                        payload,
-                    );
-
-                let frame =
-                    Frame {
-                        version:
-                            PROTOCOL_VERSION,
-
-                        frame_type:
-                            FrameType::Data,
-
-                        flags: 0,
-
-                        sequence:
-                            frame_sequence,
-
-                        payload:
-                            data.encode(),
-                    };
-
-                if send_frame(&connection, frame.encode())? {
-                    flow.pulse('▸');
-                }
-
-                packet_id =
-                    packet_id
-                        .wrapping_add(1);
-
-                frame_sequence =
-                    frame_sequence
-                        .wrapping_add(1);
-            }
-
-
-            //
-            // ---------------------------------------------
-            // QUIC -> PAYPHONE -> TUN
-            // ---------------------------------------------
-            //
-            result =
-                connection
-                    .read_datagram()
-            => {
-                let bytes =
-                    match result {
-                        Ok(bytes) => bytes,
-
-                        Err(error) => {
-                            flow.finish_line();
-
-                            return Err(
-                                format!(
-                                    "QUIC connection lost: {error}"
-                                )
-                                .into()
-                            );
-                        }
-                    };
-
-                let frame =
-                    match Frame::decode(
-                        bytes
-                    ) {
-                        Ok(frame) => frame,
-
-                        Err(_error) => {
-                            continue;
-                        }
-                    };
-
-                match frame.frame_type {
-                    FrameType::Data => {
-                        let data =
-                            Data::decode(
-                                frame.payload
-                            )?;
-
-                        if data.session_id
-                            != active.session_id
-                        {
-                            continue;
-                        }
-
-                        //
-                        // Вот здесь реальный IP packet
-                        // возвращается в macOS/Linux.
-                        //
-                        tun.send(
-                            &data.payload
-                        )
-                        .await?;
-
-                        flow.pulse('◂');
-                    }
-
-                    FrameType::Pong => {
-                        let pong =
-                            Pong::decode(
-                                frame.payload
-                            )?;
-
-                        if pong.session_id
-                            == active.session_id
-                        {
-                            flow.pulse('◂');
-                        }
-                    }
-
-                    FrameType::AccessDeniedDude => {
-                        let denied =
-                            AccessDeniedDude::decode(
-                                frame.payload
-                            )?;
-
-                        flow.finish_line();
-
-                        return Err(
-                            format!(
-                                "PAYPHONE access revoked: {:?}",
-                                denied.reason
-                            )
-                            .into()
-                        );
-                    }
-
-                    _ => {}
-                }
-            }
-
-
-            //
-            // ---------------------------------------------
-            // KEEPALIVE
-            // ---------------------------------------------
-            //
-            //
-            // Пересоздаётся заново на каждой итерации loop —
-            // именно за счёт этого интервал каждый раз новый,
-            // без ручного управления состоянием таймера.
-            //
-            _ =
-                time::sleep(random_ping_interval())
-            => {
-                let ping =
-                    Ping::new(
-                        active.session_id,
-                        ping_id,
-                    );
-
-                let frame =
-                    Frame {
-                        version:
-                            PROTOCOL_VERSION,
-
-                        frame_type:
-                            FrameType::Ping,
-
-                        flags: 0,
-
-                        sequence:
-                            frame_sequence,
-
-                        payload:
-                            ping.encode(),
-                    };
-
-                let _ = send_frame(&connection, frame.encode())?;
-
-                ping_id =
-                    ping_id
-                        .wrapping_add(1);
-
-                frame_sequence =
-                    frame_sequence
-                        .wrapping_add(1);
-            }
-
-
-            //
-            // ---------------------------------------------
-            // CTRL+C
-            // ---------------------------------------------
-            //
-            _ =
-                signal::ctrl_c()
-            => {
-                flow.finish_line();
-
-                matrix::status(
-                    "Stopping PAYPHONE VPN"
-                );
-
-                //
-                // Restore LAN routing *before* QUIC idle-wait.
-                // wait_idle can hang (tokio still owns SIGINT, so a
-                // second Ctrl+C does nothing) while /1 routes still
-                // point at utun — that is the "internet is dead after
-                // stop" failure.
-                //
-                drop(full_tunnel.take());
-
-                matrix::status("Internet restored");
-
-                break;
-            }
-
-            _ = rain_tick.tick() => {
-                flow.tick();
-            }
-
-            _ = route_watch.tick() => {
-                if let Some(ref guard) = full_tunnel {
-                    guard.ensure_tunnel_routes();
-                }
-            }
-        }
-    }
-
-    drop(full_tunnel.take());
-
-    connection.close(0u32.into(), b"client shutdown");
-
-    let _ = time::timeout(Duration::from_millis(800), endpoint.wait_idle()).await;
-
-    Ok(())
+    run_tunnel(active, tunnel_host, sink, incoming, quic).await
 }

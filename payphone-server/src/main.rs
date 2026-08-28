@@ -14,7 +14,9 @@ use ed25519_dalek::VerifyingKey;
 
 use payphone_auth::{MemoryRevocationStore, SubscriptionVerifier, VerificationKeyRing};
 
-use payphone_core::{DEFAULT_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data};
+use payphone_core::{
+    DEFAULT_PORT, DEFAULT_TCP_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data,
+};
 
 use payphone_transport::{obfuscation::ObfuscationKey, server::create_server_endpoint};
 
@@ -23,6 +25,7 @@ use payphone_tun::{create_server_tun, ipv4_destination};
 use tokio::{signal, sync::RwLock, time};
 
 mod handler;
+mod https;
 mod session;
 
 use handler::handle_packet;
@@ -172,6 +175,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         keys,
         MemoryRevocationStore::new(),
     ));
+
+    //
+    // TCP 443 camouflage: browsers get a landing page, PAYPHONE
+    // clients speak the same frames over TLS after the handshake.
+    // Set PAYPHONE_TCP_BIND_ADDR=off to disable.
+    //
+    let tcp_bind = match env::var("PAYPHONE_TCP_BIND_ADDR") {
+        Ok(value) if value == "off" || value.eq_ignore_ascii_case("false") => None,
+
+        Ok(value) => Some(
+            value
+                .parse::<SocketAddr>()
+                .map_err(|error| format!("invalid PAYPHONE_TCP_BIND_ADDR {value}: {error}"))?,
+        ),
+
+        Err(_) => {
+            let tcp_port = if address.port() == DEFAULT_PORT {
+                DEFAULT_TCP_PORT
+            } else {
+                address.port()
+            };
+
+            Some(SocketAddr::new(address.ip(), tcp_port))
+        }
+    };
+
+    let stream_ids = Arc::new(AtomicU64::new(1));
+
+    if let Some(tcp_bind) = tcp_bind {
+        let sessions = Arc::clone(&sessions);
+        let verifier = Arc::clone(&verifier);
+        let tun = Arc::clone(&tun);
+        let stream_ids = Arc::clone(&stream_ids);
+
+        tokio::spawn(async move {
+            if let Err(error) = https::run(tcp_bind, sessions, verifier, tun, stream_ids).await {
+                eprintln!("PAYPHONE HTTPS front stopped: {error}");
+            }
+        });
+    }
 
     //
     // =========================================================
@@ -356,7 +399,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     (
                                         session.id,
                                         session
-                                            .connection
+                                            .link
                                             .clone(),
                                     )
                                 }
@@ -366,7 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(
                     (
                         session_id,
-                        connection,
+                        link,
                     )
                 ) = route
                 else {
@@ -408,13 +451,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let encoded = frame.encode();
 
-                match payphone_transport::send_vpn_datagram(&connection, encoded) {
-                    Ok(_) => {}
-
-                    Err(_) => {
-                        sessions.write().await.remove(&session_id);
-                    }
-                }
+                link.send(encoded).await;
             }
 
 

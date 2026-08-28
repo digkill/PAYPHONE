@@ -1,4 +1,5 @@
 pub mod client;
+pub mod https_front;
 pub mod identity;
 pub mod obfuscated_socket;
 pub mod obfuscation;
