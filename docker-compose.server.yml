@@ -29,4 +29,13 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      # Keep the self-signed identity across redeploys so the
+      # client pin in dev-certs/payphone-cert.der stays valid.
+      - payphone-certs:/app/dev-certs
     restart: unless-stopped
+
+volumes:
+  payphone-certs:

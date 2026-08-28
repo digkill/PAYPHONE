@@ -125,6 +125,26 @@ async fn receive_frame(connection: &Connection) -> Result<Frame, Box<dyn std::er
     Ok(Frame::decode(bytes)?)
 }
 
+async fn send_frame(
+    connection: &Connection,
+    bytes: Bytes,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if connection
+        .max_datagram_size()
+        .is_some_and(|max| bytes.len() > max)
+    {
+        return Ok(false);
+    }
+
+    match connection.send_datagram_wait(bytes).await {
+        Ok(()) => Ok(true),
+
+        Err(quinn::SendDatagramError::TooLarge) => Ok(false),
+
+        Err(error) => Err(error.into()),
+    }
+}
+
 // =============================================================
 // RESUME
 // =============================================================
@@ -507,13 +527,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             data.encode(),
                     };
 
-                connection
-                    .send_datagram_wait(
-                        frame.encode()
-                    )
-                    .await?;
-
-                flow.pulse('▸');
+                if send_frame(&connection, frame.encode()).await? {
+                    flow.pulse('▸');
+                }
 
                 packet_id =
                     packet_id
@@ -654,11 +670,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ping.encode(),
                     };
 
-                connection
-                    .send_datagram_wait(
-                        frame.encode()
-                    )
-                    .await?;
+                let _ = send_frame(&connection, frame.encode()).await?;
 
                 ping_id =
                     ping_id

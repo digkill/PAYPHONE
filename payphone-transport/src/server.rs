@@ -61,7 +61,9 @@ pub fn create_server_endpoint(
     //
     // TLS уже является частью QUIC.
     //
-    let server_config = ServerConfig::with_single_cert(vec![certificate], private_key.into())?;
+    let mut server_config = ServerConfig::with_single_cert(vec![certificate], private_key.into())?;
+
+    server_config.transport_config(crate::vpn_transport());
 
     //
     // Сами биндим UDP socket и оборачиваем его в ObfuscatedSocket,

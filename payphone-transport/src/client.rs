@@ -49,7 +49,9 @@ pub fn create_client_endpoint(
     //
     // Создаём Quinn ClientConfig.
     //
-    let client_config = ClientConfig::with_root_certificates(Arc::new(roots))?;
+    let mut client_config = ClientConfig::with_root_certificates(Arc::new(roots))?;
+
+    client_config.transport_config(crate::vpn_transport());
 
     //
     // :0 означает:

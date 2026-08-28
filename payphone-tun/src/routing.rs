@@ -20,6 +20,8 @@ use std::{io, net::SocketAddr};
 /// CIDR подсети PAYPHONE VPN.
 pub const PAYPHONE_SUBNET_CIDR: &str = "10.77.0.0/24";
 
+const TUNNEL_GATEWAY: &str = "10.77.0.1";
+
 // =============================================================
 // SERVER: forwarding + NAT
 // =============================================================
@@ -142,6 +144,12 @@ pub struct FullTunnelGuard {
     original_gateway: std::net::IpAddr,
 
     tun_name: String,
+
+    #[cfg(target_os = "macos")]
+    ipv6_service: Option<String>,
+
+    #[cfg(target_os = "macos")]
+    dns_restore: Option<(String, Vec<String>)>,
 }
 
 impl FullTunnelGuard {
@@ -163,24 +171,33 @@ impl FullTunnelGuard {
         //
         macos::run_route(&[
             "add",
+            "-inet",
             "-host",
             &server_ip.to_string(),
             &original_gateway.to_string(),
         ])?;
 
         //
-        // Классический трюк с двумя /1 вместо одного 0.0.0.0/0:
-        // более специфичный route побеждает настоящий default,
-        // не удаляя и не трогая его.
+        // Next-hop 10.77.0.1 (the utun peer), not `-interface`.
+        // On macOS a /1 route bound only to the interface often
+        // shows up in netstat but is ignored for real sockets —
+        // IPv4 then keeps using the ISP default, which is why
+        // 2ip still showed the home address with the tunnel "up".
         //
-        macos::run_route(&["add", "-net", "0.0.0.0/1", "-interface", tun_name])?;
+        macos::run_route(&["add", "-inet", "-net", "0.0.0.0/1", TUNNEL_GATEWAY])?;
 
-        macos::run_route(&["add", "-net", "128.0.0.0/1", "-interface", tun_name])?;
+        macos::run_route(&["add", "-inet", "-net", "128.0.0.0/1", TUNNEL_GATEWAY])?;
+
+        let ipv6_service = macos::disable_ipv6_on_default_service();
+
+        let dns_restore = macos::pin_dns_through_tunnel();
 
         Ok(Self {
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
+            ipv6_service,
+            dns_restore,
         })
     }
 
@@ -206,6 +223,10 @@ impl FullTunnelGuard {
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
+            #[cfg(target_os = "macos")]
+            ipv6_service: None,
+            #[cfg(target_os = "macos")]
+            dns_restore: None,
         })
     }
 
@@ -221,19 +242,23 @@ impl Drop for FullTunnelGuard {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            if let Some((service, servers)) = self.dns_restore.take() {
+                macos::restore_dns(&service, &servers);
+            }
+
+            if let Some(service) = self.ipv6_service.take() {
+                let _ = macos::run_networksetup(&["-setv6automatic", &service]);
+            }
+
+            let _ = self.tun_name.as_str();
+
+            let _ = macos::run_route(&["delete", "-inet", "-net", "128.0.0.0/1", TUNNEL_GATEWAY]);
+
+            let _ = macos::run_route(&["delete", "-inet", "-net", "0.0.0.0/1", TUNNEL_GATEWAY]);
+
             let _ = macos::run_route(&[
                 "delete",
-                "-net",
-                "128.0.0.0/1",
-                "-interface",
-                &self.tun_name,
-            ]);
-
-            let _ =
-                macos::run_route(&["delete", "-net", "0.0.0.0/1", "-interface", &self.tun_name]);
-
-            let _ = macos::run_route(&[
-                "delete",
+                "-inet",
                 "-host",
                 &self.server_ip.to_string(),
                 &self.original_gateway.to_string(),
@@ -299,6 +324,129 @@ mod macos {
         }
 
         Ok(())
+    }
+
+    pub fn run_networksetup(args: &[&str]) -> io::Result<String> {
+        let output = Command::new("networksetup").args(args).output()?;
+
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "networksetup {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn default_interface() -> io::Result<String> {
+        let output = Command::new("route")
+            .args(["-n", "get", "default"])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(io::Error::other("`route -n get default` failed"));
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        for line in text.lines() {
+            if let Some(value) = line.trim().strip_prefix("interface:") {
+                return Ok(value.trim().to_string());
+            }
+        }
+
+        Err(io::Error::other(
+            "no interface found in `route -n get default` output",
+        ))
+    }
+
+    fn service_for_device(device: &str) -> io::Result<String> {
+        let text = run_networksetup(&["-listnetworkserviceorder"])?;
+
+        let mut last_service: Option<String> = None;
+
+        for line in text.lines() {
+            let line = line.trim();
+
+            if let Some(name) = line.strip_prefix("(").and_then(|rest| {
+                rest.split_once(") ")
+                    .filter(|(index, _)| index.chars().all(|c| c.is_ascii_digit()))
+                    .map(|(_, name)| name.to_string())
+            }) {
+                last_service = Some(name);
+
+                continue;
+            }
+
+            let marker = format!("Device: {device}");
+
+            if line.contains(&marker) {
+                if let Some(service) = last_service {
+                    return Ok(service);
+                }
+            }
+        }
+
+        Err(io::Error::other(format!(
+            "no networksetup service for device {device}"
+        )))
+    }
+
+    /// Dual-stack ISPs (Rostelecom etc.) keep IPv6 on the physical
+    /// NIC. Browsers prefer it, so 2ip shows the home address even
+    /// while IPv4 is inside the tunnel. Turn IPv6 off on the default
+    /// service for the life of the guard.
+    pub fn disable_ipv6_on_default_service() -> Option<String> {
+        let device = default_interface().ok()?;
+
+        let service = service_for_device(&device).ok()?;
+
+        run_networksetup(&["-setv6off", &service]).ok()?;
+
+        Some(service)
+    }
+
+    /// Point macOS DNS at resolvers that only exist as public IPv4,
+    /// so lookups take the tunnel instead of the ISP CPE at 192.168.x.x.
+    pub fn pin_dns_through_tunnel() -> Option<(String, Vec<String>)> {
+        let device = default_interface().ok()?;
+
+        let service = service_for_device(&device).ok()?;
+
+        let current = run_networksetup(&["-getdnsservers", &service]).ok()?;
+
+        let original: Vec<String> = if current.contains("aren't any DNS Servers")
+            || current.contains("There aren't any DNS Servers")
+        {
+            Vec::new()
+        } else {
+            current
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        };
+
+        run_networksetup(&["-setdnsservers", &service, "1.1.1.1", "8.8.8.8"]).ok()?;
+
+        Some((service, original))
+    }
+
+    pub fn restore_dns(service: &str, servers: &[String]) {
+        if servers.is_empty() {
+            let _ = run_networksetup(&["-setdnsservers", service, "Empty"]);
+        } else {
+            let mut args = vec!["-setdnsservers", service];
+
+            for server in servers {
+                args.push(server.as_str());
+            }
+
+            let _ = run_networksetup(&args);
+        }
     }
 }
 

@@ -54,6 +54,24 @@ pub const SERVER_TUN_IPV4: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 /// QUIC -> TUN.
 pub type SharedTun = Arc<AsyncDevice>;
 
+fn force_interface_mtu(device: &AsyncDevice, mtu: u16) {
+    //
+    // tun-rs asks for an MTU, but on macOS the utun sometimes
+    // keeps a 1500-byte kernel MTU. Those packets become PAYPHONE
+    // frames larger than quinn's datagram budget and used to
+    // crash the client with TooLarge as soon as real browsing
+    // started.
+    //
+    #[cfg(unix)]
+    if let Ok(name) = device.name() {
+        let _ = std::process::Command::new("ifconfig")
+            .args([&name, "mtu", &mtu.to_string()])
+            .status();
+    }
+
+    let _ = (device, mtu);
+}
+
 /// Создаёт клиентский TUN.
 ///
 /// `assigned_ipv4` приходит
@@ -86,6 +104,8 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
     //
     let device = builder.build_async()?;
 
+    force_interface_mtu(&device, mtu);
+
     Ok(Arc::new(device))
 }
 
@@ -103,6 +123,8 @@ pub fn create_server_tun() -> io::Result<SharedTun> {
     let builder = builder.name("payphone0");
 
     let device = builder.build_async()?;
+
+    force_interface_mtu(&device, PAYPHONE_MTU);
 
     Ok(Arc::new(device))
 }

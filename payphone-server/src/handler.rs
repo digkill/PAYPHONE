@@ -38,10 +38,9 @@ pub async fn handle_packet(
 
     tun: SharedTun,
 
-    client_address: SocketAddr,
-
     packet: Bytes,
 ) {
+    let client_address = connection.remote_address();
     let frame = match Frame::decode(packet) {
         Ok(frame) => frame,
 

@@ -15,7 +15,7 @@ use payphone_core::{
 
 pub type SessionId = [u8; SESSION_ID_SIZE];
 
-pub const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+pub const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 pub struct Session {
@@ -181,6 +181,15 @@ impl SessionManager {
 
     pub fn remove(&mut self, id: &SessionId) -> Option<Session> {
         self.sessions.remove(id)
+    }
+
+    pub fn remove_by_stable_id(&mut self, stable_id: usize) -> usize {
+        let before = self.sessions.len();
+
+        self.sessions
+            .retain(|_id, session| session.connection.stable_id() != stable_id);
+
+        before - self.sessions.len()
     }
 
     /// Находит Session

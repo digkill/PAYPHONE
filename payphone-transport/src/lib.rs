@@ -4,6 +4,41 @@ pub mod obfuscated_socket;
 pub mod obfuscation;
 pub mod server;
 
+use std::{sync::Arc, time::Duration};
+
+use quinn::TransportConfig;
+
+/// QUIC transport for a long-lived VPN, not a short web request.
+///
+/// Quinn's defaults idle-out a quiet connection in 30s. PAYPHONE
+/// keepalives are jittered around 7–15s, and a brief UDP blip
+/// (Wi-Fi roam, NAT rebind, DPI drop) used to kill the session:
+/// the client vanished, the server kept writing `connection lost`
+/// into TUN→QUIC, and after `SESSION_TIMEOUT` the VPN address was
+/// gone. Raise the idle ceiling and send QUIC-layer keepalives so
+/// the connection survives those gaps.
+pub fn vpn_transport_config() -> TransportConfig {
+    let mut transport = TransportConfig::default();
+
+    transport.max_idle_timeout(Some(
+        Duration::from_secs(120)
+            .try_into()
+            .expect("120s is within QUIC idle-timeout bounds"),
+    ));
+
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+
+    transport.datagram_receive_buffer_size(Some(1_048_576));
+
+    transport.datagram_send_buffer_size(1_048_576);
+
+    transport
+}
+
+pub fn vpn_transport() -> Arc<TransportConfig> {
+    Arc::new(vpn_transport_config())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
