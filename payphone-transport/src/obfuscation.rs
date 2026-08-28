@@ -49,32 +49,30 @@ const LENGTH_PREFIX_LEN: usize = 2;
 // Без padding итоговая длина на проводе однозначно повторяет
 // длину реальной QUIC-датаграммы (плюс фиксированные +8 salt) —
 // последовательность размеров почти не отличается от учебного
-// QUIC/HTTP3. Округляем каждую датаграмму вверх до одного из
-// этих "бакетов", чтобы сгладить кластеризацию по размеру.
+// QUIC/HTTP3. Добавляем небольшой случайный "хвост", чтобы
+// сломать эту точную сигнатуру.
 //
-// Ориентир — уже наблюдаемые в проекте реальные размеры: мелкие
-// служебные кадры (Ping/Pong/ACK-continuation, ~30-150 байт),
-// средние, и QUIC handshake/MTU-probe пакеты, кучкующиеся у
-// потолка ~1200-1460 (см. PAYPHONE_MTU в payphone-tun).
+// ВАЖНО: это НЕБОЛЬШОЙ и РАВНОМЕРНЫЙ паддинг, не округление до
+// далёких друг от друга "бакетов". Первая версия округляла размер
+// вверх до одного из [128, 296, 568, 1200, 1440] — для пакета
+// ровно на 1200-байтной MTU-границе это означало скачок сразу до
+// 1440 (+230 байт). Каждый пакет, включая служебные PMTU-discovery
+// пробы самого quinn, проходит именно через этот слой обфускации
+// (см. `ObfuscatedSocket`), поэтому такой скачок мог раздувать
+// пробный пакет quinn выше реального MTU пути, проба терялась, и
+// quinn занижал свою оценку допустимого размера датаграммы — вплоть
+// до `SendDatagramError::TooLarge` на честных MTU-размера кадрах
+// (воспроизведено на реальном деплое после включения бакетов).
+// Маленький ограниченный паддинг такого искажения не создаёт.
 //
-// Наибольший бакет (1440) намеренно НЕ у самого потолка обычного
-// (не jumbo) Ethernet UDP payload (1472 = 1500 MTU - IP(20) -
-// UDP(8)) — оставляем запас, чтобы не спровоцировать
-// фрагментацию на путях с меньшим эффективным MTU (PPPoE и
-// подобные снижают его ниже 1500). Самые крупные QUIC MTU-probe
-// пакеты (наблюдались до ~1460 сырых) в этот бакет не влезают и
-// идут без padding — см. `target_length`: данные при этом
-// никогда не режутся и не теряются, просто теряют часть эффекта
-// маскировки для этого редкого случая.
-//
-const PADDING_BUCKETS: &[usize] = &[128, 296, 568, 1200, 1440];
+const MAX_PADDING: usize = 32;
 
-fn target_length(actual: usize) -> usize {
-    PADDING_BUCKETS
-        .iter()
-        .copied()
-        .find(|&bucket| bucket >= actual)
-        .unwrap_or(actual)
+fn random_pad_len() -> io::Result<usize> {
+    let mut byte = [0u8; 1];
+
+    OsRng.try_fill_bytes(&mut byte).map_err(io::Error::other)?;
+
+    Ok(byte[0] as usize % (MAX_PADDING + 1))
 }
 
 //
@@ -143,13 +141,13 @@ impl ObfuscationKey {
 
     //
     // salt (случайный) + XOR(
-    //   [2-byte длина payload][payload][случайный padding],
+    //   [2-byte длина payload][payload][небольшой случайный padding],
     //   keystream, зациклённый
     // )
     //
-    // Итоговая длина округляется вверх до одного из
-    // PADDING_BUCKETS, чтобы сгладить кластеризацию размеров
-    // (см. их описание выше).
+    // pad_len — равномерно случайный [0, MAX_PADDING] на каждый
+    // вызов, независимо от размера payload (см. комментарий у
+    // MAX_PADDING про то, почему не бакеты).
     //
     pub fn obfuscate(&self, payload: &[u8]) -> io::Result<Vec<u8>> {
         let mut salt = [0u8; SALT_LEN];
@@ -163,11 +161,7 @@ impl ObfuscationKey {
             .try_into()
             .map_err(|_| io::Error::other("payload too large to obfuscate (> 65535 bytes)"))?;
 
-        let unpadded_len = SALT_LEN + LENGTH_PREFIX_LEN + payload.len();
-
-        let total_len = target_length(unpadded_len);
-
-        let pad_len = total_len - unpadded_len;
+        let pad_len = random_pad_len()?;
 
         let mut padding = vec![0u8; pad_len];
 
@@ -310,20 +304,30 @@ mod tests {
     }
 
     #[test]
-    fn wire_length_lands_on_a_bucket() {
+    fn padding_stays_within_bound() {
         let key = ObfuscationKey::from_passphrase("test-passphrase");
 
+        //
+        // Паддинг маленький и равномерный — никаких далёких
+        // "прыжков" по размеру (см. комментарий у MAX_PADDING про
+        // то, почему бакеты сломали PMTU discovery в quinn).
+        //
         for len in [0usize, 1, 40, 120, 300, 600, 1199, 1300, 1465] {
             let payload = vec![0xABu8; len];
 
             let wire = key.obfuscate(&payload).expect("obfuscate failed");
 
+            let min_len = SALT_LEN + LENGTH_PREFIX_LEN + len;
+
+            let max_len = min_len + MAX_PADDING;
+
             assert!(
-                PADDING_BUCKETS.contains(&wire.len())
-                    || wire.len() == SALT_LEN + LENGTH_PREFIX_LEN + len,
-                "wire length {} for payload length {} landed on neither a bucket nor the unpadded size",
+                (min_len..=max_len).contains(&wire.len()),
+                "wire length {} for payload length {} outside expected [{}, {}]",
                 wire.len(),
                 len,
+                min_len,
+                max_len,
             );
 
             let plain = key.deobfuscate(&wire).expect("deobfuscate failed");
@@ -333,13 +337,9 @@ mod tests {
     }
 
     #[test]
-    fn oversized_payload_is_not_truncated() {
+    fn large_payload_roundtrips() {
         let key = ObfuscationKey::from_passphrase("test-passphrase");
 
-        //
-        // Больше самого крупного бакета — обфускация не должна
-        // резать данные, просто не паддит.
-        //
         let payload = vec![0x42u8; 2000];
 
         let wire = key.obfuscate(&payload).expect("obfuscate failed");
