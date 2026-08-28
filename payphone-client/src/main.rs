@@ -125,28 +125,12 @@ async fn receive_frame(connection: &Connection) -> Result<Frame, Box<dyn std::er
     Ok(Frame::decode(bytes)?)
 }
 
-async fn send_frame(
+fn send_frame(
     connection: &Connection,
     bytes: Bytes,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if connection
-        .max_datagram_size()
-        .is_some_and(|max| bytes.len() > max)
-    {
-        return Ok(false);
-    }
-
-    match connection.send_datagram_wait(bytes).await {
-        Ok(()) => Ok(true),
-
-        Err(quinn::SendDatagramError::TooLarge) => Ok(false),
-
-        Err(quinn::SendDatagramError::ConnectionLost(error)) => {
-            Err(format!("QUIC connection lost: {error}").into())
-        }
-
-        Err(error) => Err(error.into()),
-    }
+    payphone_transport::send_vpn_datagram(connection, bytes)
+        .map_err(|error| format!("QUIC connection lost: {error}").into())
 }
 
 // =============================================================
@@ -370,9 +354,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // QUIC/TLS.
     //
+    let bind_iface = payphone_tun::routing::default_physical_interface();
+
     let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
 
-    let endpoint = create_client_endpoint(obfuscation_key, dev_mode, bind_ip)?;
+    let endpoint = create_client_endpoint(obfuscation_key, dev_mode, bind_ip, bind_iface.as_deref())?;
 
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 
@@ -440,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     let tun_name = tun.name()?;
 
-    let full_tunnel =
+    let mut full_tunnel =
         match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
             Ok(guard) => {
                 matrix::status(
@@ -478,6 +464,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flow = matrix::FlowIndicator::new();
 
     //
+    // Persistent interval. `sleep(2s)` *inside* the loop was reset
+    // on every TUN/QUIC packet, so under real traffic the host-route
+    // watchdog never ran — exactly when macOS was wiping routes.
+    //
+    let mut route_watch = time::interval(Duration::from_millis(400));
+
+    route_watch.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+    let mut rain_tick = time::interval(Duration::from_millis(50));
+
+    rain_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+    //
     // =========================================================
     // VPN LOOP
     // =========================================================
@@ -485,6 +484,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         tokio::select! {
+
             //
             // ---------------------------------------------
             // TUN -> PAYPHONE -> QUIC
@@ -533,7 +533,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             data.encode(),
                     };
 
-                if send_frame(&connection, frame.encode()).await? {
+                if send_frame(&connection, frame.encode())? {
                     flow.pulse('▸');
                 }
 
@@ -578,14 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ) {
                         Ok(frame) => frame,
 
-                        Err(error) => {
-                            flow.finish_line();
-
-                            eprintln!(
-                                "Invalid PAYPHONE frame: {}",
-                                error
-                            );
-
+                        Err(_error) => {
                             continue;
                         }
                     };
@@ -624,12 +617,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if pong.session_id
                             == active.session_id
                         {
-                            flow.finish_line();
-
-                            matrix::status(&format!(
-                                "PONG {}",
-                                pong.ping_id
-                            ));
+                            flow.pulse('◂');
                         }
                     }
 
@@ -638,6 +626,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             AccessDeniedDude::decode(
                                 frame.payload
                             )?;
+
+                        flow.finish_line();
 
                         return Err(
                             format!(
@@ -689,7 +679,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ping.encode(),
                     };
 
-                let _ = send_frame(&connection, frame.encode()).await?;
+                let _ = send_frame(&connection, frame.encode())?;
 
                 ping_id =
                     ping_id
@@ -698,15 +688,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame_sequence =
                     frame_sequence
                         .wrapping_add(1);
-            }
-
-
-            _ =
-                time::sleep(Duration::from_secs(2))
-            => {
-                if let Some(ref guard) = full_tunnel {
-                    guard.ensure_server_bypass();
-                }
             }
 
 
@@ -724,14 +705,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Stopping PAYPHONE VPN"
                 );
 
+                //
+                // Restore LAN routing *before* QUIC idle-wait.
+                // wait_idle can hang (tokio still owns SIGINT, so a
+                // second Ctrl+C does nothing) while /1 routes still
+                // point at utun — that is the "internet is dead after
+                // stop" failure.
+                //
+                drop(full_tunnel.take());
+
+                matrix::status("Internet restored");
+
                 break;
+            }
+
+            _ = rain_tick.tick() => {
+                flow.tick();
+            }
+
+            _ = route_watch.tick() => {
+                if let Some(ref guard) = full_tunnel {
+                    guard.ensure_tunnel_routes();
+                }
             }
         }
     }
 
+    drop(full_tunnel.take());
+
     connection.close(0u32.into(), b"client shutdown");
 
-    endpoint.wait_idle().await;
+    let _ = time::timeout(Duration::from_millis(800), endpoint.wait_idle()).await;
 
     Ok(())
 }

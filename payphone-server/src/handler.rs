@@ -257,8 +257,6 @@ async fn handle_data(
 
     frame: Frame,
 ) {
-    let sequence = frame.sequence;
-
     let data = match Data::decode(frame.payload) {
         Ok(data) => data,
 
@@ -270,9 +268,9 @@ async fn handle_data(
     };
 
     let allowed = {
-        let mut manager = sessions.write().await;
+        let manager = sessions.read().await;
 
-        let Some(session) = manager.get_mut(&data.session_id) else {
+        let Some(session) = manager.get(&data.session_id) else {
             return;
         };
 
@@ -298,10 +296,6 @@ async fn handle_data(
                 return;
             }
         }
-
-        session.last_activity = Instant::now();
-
-        session.last_sequence = sequence;
 
         true
     };
@@ -370,7 +364,7 @@ async fn handle_ping(
         payload: pong.encode(),
     };
 
-    let _ = connection.send_datagram_wait(frame.encode()).await;
+    let _ = payphone_transport::send_vpn_datagram(&connection, frame.encode());
 }
 
 // =============================================================

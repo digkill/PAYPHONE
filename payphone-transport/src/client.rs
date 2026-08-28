@@ -23,6 +23,7 @@ pub fn create_client_endpoint(
     obfuscation_key: ObfuscationKey,
     dev_mode: bool,
     bind_ip: Option<IpAddr>,
+    bind_iface: Option<&str>,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
     //
     // Читаем certificate PAYPHONE server.
@@ -68,6 +69,24 @@ pub fn create_client_endpoint(
     //
     let socket = std::net::UdpSocket::bind(bind_address)?;
 
+    crate::tune_udp_buffers(&socket);
+
+    //
+    // Pin UDP to the LAN NIC. Binding the source IP is not enough:
+    // once 0.0.0.0/1 points at utun, the kernel still egresses
+    // unscoped datagrams into the tunnel. IP_BOUND_IF forces en0
+    // even if macOS has just rebuilt the routing table.
+    //
+    #[cfg(target_os = "macos")]
+    if let Some(iface) = bind_iface {
+        if let Err(error) = macos_iface::bind_udp_to_iface(&socket, iface) {
+            eprintln!("PAYPHONE: IP_BOUND_IF {iface} failed ({error})");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = bind_iface;
+
     let runtime = default_runtime()
         .ok_or_else(|| "no async runtime found for PAYPHONE QUIC endpoint".to_string())?;
 
@@ -89,4 +108,39 @@ pub fn create_client_endpoint(
     endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)
+}
+
+#[cfg(target_os = "macos")]
+mod macos_iface {
+    use std::{io, net::UdpSocket, os::unix::io::AsRawFd};
+
+    pub fn bind_udp_to_iface(socket: &UdpSocket, iface: &str) -> io::Result<()> {
+        let c_name = std::ffi::CString::new(iface).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "interface name contains NUL")
+        })?;
+
+        let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+
+        if index == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let fd = socket.as_raw_fd();
+
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_BOUND_IF,
+                (&index as *const u32).cast(),
+                std::mem::size_of_val(&index) as libc::socklen_t,
+            )
+        };
+
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
 }

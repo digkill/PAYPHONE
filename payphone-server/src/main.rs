@@ -20,8 +20,6 @@ use payphone_transport::{obfuscation::ObfuscationKey, server::create_server_endp
 
 use payphone_tun::{create_server_tun, ipv4_destination};
 
-use quinn::SendDatagramError;
-
 use tokio::{signal, sync::RwLock, time};
 
 mod handler;
@@ -291,18 +289,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let connection_clone =
                                 connection.clone();
 
-                            tokio::spawn(
-                                async move {
-                                    handle_packet(
-                                        connection_clone,
-                                        sessions,
-                                        verifier,
-                                        tun,
-                                        packet,
-                                    )
-                                    .await;
-                                }
-                            );
+                            handle_packet(
+                                connection_clone,
+                                sessions,
+                                verifier,
+                                tun,
+                                packet,
+                            )
+                            .await;
                         }
                     }
                 );
@@ -414,24 +408,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let encoded = frame.encode();
 
-                if connection
-                    .max_datagram_size()
-                    .is_some_and(|max| encoded.len() > max)
-                {
-                    continue;
-                }
+                match payphone_transport::send_vpn_datagram(&connection, encoded) {
+                    Ok(_) => {}
 
-                match connection.send_datagram_wait(encoded).await {
-                    Ok(()) => {}
-
-                    Err(SendDatagramError::TooLarge) => {}
-
-                    Err(SendDatagramError::ConnectionLost(_)) => {
+                    Err(_) => {
                         sessions.write().await.remove(&session_id);
-                    }
-
-                    Err(error) => {
-                        eprintln!("QUIC DATA send error: {}", error);
                     }
                 }
             }

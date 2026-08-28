@@ -71,6 +71,8 @@ pub fn create_server_endpoint(
     //
     let socket = std::net::UdpSocket::bind(address)?;
 
+    crate::tune_udp_buffers(&socket);
+
     let runtime = default_runtime()
         .ok_or_else(|| "no async runtime found for PAYPHONE QUIC endpoint".to_string())?;
 

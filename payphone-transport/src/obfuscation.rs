@@ -1,4 +1,7 @@
-use std::io;
+use std::{
+    cell::Cell,
+    io,
+};
 
 use rand_core::{OsRng, TryRngCore};
 
@@ -67,12 +70,54 @@ const LENGTH_PREFIX_LEN: usize = 2;
 //
 const MAX_PADDING: usize = 32;
 
-fn random_pad_len() -> io::Result<usize> {
+fn fill_random(out: &mut [u8]) {
+    //
+    // OsRng on every datagram was a syscall on the hot path
+    // (salt + padding for every QUIC packet, including ACKs).
+    // One OS seed per thread, then xorshift, is enough for
+    // obfuscation salt — this layer is not encryption.
+    //
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    STATE.with(|cell| {
+        let mut state = cell.get();
+
+        if state == 0 {
+            let mut seed = [0u8; 8];
+
+            let _ = OsRng.try_fill_bytes(&mut seed);
+
+            state = u64::from_le_bytes(seed) | 1;
+        }
+
+        let mut offset = 0;
+
+        while offset < out.len() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+
+            let bytes = state.to_le_bytes();
+
+            let take = (out.len() - offset).min(8);
+
+            out[offset..offset + take].copy_from_slice(&bytes[..take]);
+
+            offset += take;
+        }
+
+        cell.set(state);
+    });
+}
+
+fn random_pad_len() -> usize {
     let mut byte = [0u8; 1];
 
-    OsRng.try_fill_bytes(&mut byte).map_err(io::Error::other)?;
+    fill_random(&mut byte);
 
-    Ok(byte[0] as usize % (MAX_PADDING + 1))
+    byte[0] as usize % (MAX_PADDING + 1)
 }
 
 //
@@ -152,7 +197,7 @@ impl ObfuscationKey {
     pub fn obfuscate(&self, payload: &[u8]) -> io::Result<Vec<u8>> {
         let mut salt = [0u8; SALT_LEN];
 
-        OsRng.try_fill_bytes(&mut salt).map_err(io::Error::other)?;
+        fill_random(&mut salt);
 
         let stream = self.keystream(&salt);
 
@@ -161,13 +206,11 @@ impl ObfuscationKey {
             .try_into()
             .map_err(|_| io::Error::other("payload too large to obfuscate (> 65535 bytes)"))?;
 
-        let pad_len = random_pad_len()?;
+        let pad_len = random_pad_len();
 
         let mut padding = vec![0u8; pad_len];
 
-        OsRng
-            .try_fill_bytes(&mut padding)
-            .map_err(io::Error::other)?;
+        fill_random(&mut padding);
 
         //
         // Всё, что XOR'ится: [длина][payload][padding].

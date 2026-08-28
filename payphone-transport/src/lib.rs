@@ -28,15 +28,92 @@ pub fn vpn_transport_config() -> TransportConfig {
 
     transport.keep_alive_interval(Some(Duration::from_secs(5)));
 
-    transport.datagram_receive_buffer_size(Some(1_048_576));
+    //
+    // Quinn defaults to 333ms (RFC 9002) before the first sample.
+    // A VPN to a nearby VPS is typically 20–80ms; starting that
+    // pessimistic makes slow-start crawl and the tunnel feels
+    // "protocol-slow" even on an empty path.
+    //
+    transport.initial_rtt(Duration::from_millis(80));
 
-    transport.datagram_send_buffer_size(1_048_576);
+    //
+    // Cubic treats loss as congestion and backs off hard — inner
+    // TCP then also backs off (double control loop). BBR paces to
+    // measured bandwidth and recovers faster on Wi-Fi / DPI drops.
+    //
+    transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
+    transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+
+    transport.datagram_send_buffer_size(2 * 1024 * 1024);
 
     transport
 }
 
 pub fn vpn_transport() -> Arc<TransportConfig> {
     Arc::new(vpn_transport_config())
+}
+
+/// Queue a PAYPHONE datagram without waiting for congestion window.
+///
+/// Waiting (`send_datagram_wait`) serialized TUN reads behind QUIC
+/// send, so one slow packet stalled the whole VPN. Datagrams are
+/// unreliable anyway — if the buffer is full, older packets are
+/// dropped and inner TCP/QUIC retransmits. Returns `false` when the
+/// frame does not fit the current path MTU.
+pub fn send_vpn_datagram(
+    connection: &quinn::Connection,
+    bytes: bytes::Bytes,
+) -> Result<bool, quinn::ConnectionError> {
+    if connection
+        .max_datagram_size()
+        .is_some_and(|max| bytes.len() > max)
+    {
+        return Ok(false);
+    }
+
+    match connection.send_datagram(bytes) {
+        Ok(()) => Ok(true),
+
+        Err(quinn::SendDatagramError::TooLarge)
+        | Err(quinn::SendDatagramError::UnsupportedByPeer)
+        | Err(quinn::SendDatagramError::Disabled) => Ok(false),
+
+        Err(quinn::SendDatagramError::ConnectionLost(error)) => Err(error),
+    }
+}
+
+pub(crate) fn tune_udp_buffers(socket: &std::net::UdpSocket) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        let fd = socket.as_raw_fd();
+
+        let size = (4 * 1024 * 1024) as libc::c_int;
+
+        let len = std::mem::size_of_val(&size) as libc::socklen_t;
+
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&size as *const libc::c_int).cast(),
+                len,
+            );
+
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&size as *const libc::c_int).cast(),
+                len,
+            );
+        }
+    }
+
+    let _ = socket;
 }
 
 #[cfg(test)]
@@ -112,7 +189,7 @@ mod tests {
         });
 
         let client_endpoint =
-            create_client_endpoint(key, true, None).expect("client endpoint creation failed");
+            create_client_endpoint(key, true, None, None).expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
@@ -156,7 +233,7 @@ mod tests {
         // деобфусцируется валидным passphrase.
         let server_task = tokio::spawn(async move { server_endpoint.accept().await });
 
-        let client_endpoint = create_client_endpoint(client_key, true, None)
+        let client_endpoint = create_client_endpoint(client_key, true, None, None)
             .expect("client endpoint creation failed");
 
         let client_result = tokio::time::timeout(
@@ -211,7 +288,7 @@ mod tests {
         });
 
         let client_endpoint =
-            create_client_endpoint(key, true, None).expect("client endpoint creation failed");
+            create_client_endpoint(key, true, None, None).expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
