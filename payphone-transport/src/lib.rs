@@ -139,4 +139,68 @@ mod tests {
 
         server_task.abort();
     }
+
+    //
+    // Regression test for a real production failure:
+    // SendDatagramError::TooLarge on an otherwise-honest,
+    // PAYPHONE_MTU-sized frame sent immediately after the
+    // handshake — before QUIC's own MTU discovery has had any
+    // chance to grow the datagram budget past its safe RFC 9000
+    // floor (1200 bytes, ~1154 usable after quinn's own overhead).
+    //
+    // MAX_FRAME_SIZE mirrors payphone_tun::PAYPHONE_MTU (1100) +
+    // payphone_core::HEADER_SIZE (16) + data::DATA_HEADER_SIZE (24)
+    // without pulling in those crates as a dependency here.
+    #[tokio::test]
+    async fn max_size_frame_sends_immediately_after_handshake() {
+        const MAX_FRAME_SIZE: usize = 1100 + 16 + 24;
+
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+        let key = ObfuscationKey::from_passphrase("matching-passphrase");
+
+        let server_endpoint = create_server_endpoint(address, key.clone(), true)
+            .expect("server endpoint creation failed");
+
+        let server_address = server_endpoint
+            .local_addr()
+            .expect("failed to get server endpoint address");
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server_endpoint
+                .accept()
+                .await
+                .expect("server did not receive a connection attempt");
+
+            incoming.await.expect("server-side handshake failed")
+        });
+
+        let client_endpoint =
+            create_client_endpoint(key, true).expect("client endpoint creation failed");
+
+        let client_connection = client_endpoint
+            .connect(server_address, SERVER_NAME)
+            .expect("client connect() setup failed")
+            .await
+            .expect("client-side handshake failed");
+
+        let server_connection = server_task.await.expect("server task panicked");
+
+        let payload = vec![0xABu8; MAX_FRAME_SIZE];
+
+        client_connection
+            .send_datagram_wait(payload.clone().into())
+            .await
+            .expect("max-size PAYPHONE frame should fit within quinn's guaranteed MTU floor");
+
+        let received = server_connection
+            .read_datagram()
+            .await
+            .expect("server did not receive the datagram");
+
+        assert_eq!(received.as_ref(), payload.as_slice());
+
+        client_connection.close(0u32.into(), b"test finished");
+        server_connection.close(0u32.into(), b"test finished");
+    }
 }
