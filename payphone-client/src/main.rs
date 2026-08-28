@@ -544,6 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(frame) => frame,
 
                         Err(error) => {
+                            flow.finish_line();
+
                             eprintln!(
                                 "Invalid PAYPHONE frame: {}",
                                 error
@@ -587,10 +589,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if pong.session_id
                             == active.session_id
                         {
-                            println!(
+                            flow.finish_line();
+
+                            matrix::status(&format!(
                                 "PONG {}",
                                 pong.ping_id
-                            );
+                            ));
                         }
                     }
 
@@ -674,11 +678,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ =
                 signal::ctrl_c()
             => {
-                //
-                // Перевод строки после хвоста "▸◂"-индикаторов
-                // (они печатаются без \n).
-                //
-                println!();
+                flow.finish_line();
 
                 matrix::status(
                     "Stopping PAYPHONE VPN"

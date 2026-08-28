@@ -11,7 +11,6 @@ use std::{
 };
 
 const RESET: &str = "\x1b[0m";
-const GREEN: &str = "\x1b[32m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const BOLD_GREEN: &str = "\x1b[1;32m";
 const DIM_GREEN: &str = "\x1b[2;32m";
@@ -155,13 +154,25 @@ pub fn tunnel_open_banner() {
     println!();
 }
 
-/// Живой индикатор потока пакетов: печатает зелёный символ без
-/// перевода строки, с throttling, чтобы не заспамить терминал
-/// при интенсивном трафике.
+const INDICATOR_WIDTH: usize = 18;
+
+/// Живой индикатор потока пакетов — "прелоадер", а не бесконечная
+/// простыня символов.
+///
+/// Перерисовывает ОДНУ строку на месте (`\r` + `\x1b[K`), не
+/// добавляя новых строк в терминал, даже при очень интенсивном
+/// трафике. Внутри — маленькое окно бегущих "матричных" символов
+/// (косметика) и счётчик пакетов (реальная информация).
 pub struct FlowIndicator {
     last_printed: Instant,
 
     min_interval: Duration,
+
+    window: [char; INDICATOR_WIDTH],
+
+    packet_count: u64,
+
+    rng_state: u64,
 }
 
 impl FlowIndicator {
@@ -169,13 +180,30 @@ impl FlowIndicator {
         Self {
             last_printed: Instant::now() - Duration::from_secs(1),
 
-            min_interval: Duration::from_millis(60),
+            min_interval: Duration::from_millis(80),
+
+            window: [' '; INDICATOR_WIDTH],
+
+            packet_count: 0,
+
+            rng_state: 0xd1b54a32d192ed03,
         }
     }
 
+    fn next_char(&mut self) -> char {
+        self.rng_state ^= self.rng_state << 13;
+        self.rng_state ^= self.rng_state >> 7;
+        self.rng_state ^= self.rng_state << 17;
+
+        RAIN_CHARS[(self.rng_state as usize) % RAIN_CHARS.len()]
+    }
+
     /// `symbol`: '▸' для исходящих (TUN -> QUIC), '◂' для
-    /// входящих (QUIC -> TUN).
+    /// входящих (QUIC -> TUN) — определяет, с какой стороны
+    /// "окна" появляется новый символ.
     pub fn pulse(&mut self, symbol: char) {
+        self.packet_count = self.packet_count.wrapping_add(1);
+
         let now = Instant::now();
 
         if now.duration_since(self.last_printed) < self.min_interval {
@@ -184,8 +212,31 @@ impl FlowIndicator {
 
         self.last_printed = now;
 
-        print!("{GREEN}{symbol}{RESET}");
+        let fresh = self.next_char();
+
+        if symbol == '▸' {
+            self.window.copy_within(1.., 0);
+            self.window[INDICATOR_WIDTH - 1] = fresh;
+        } else {
+            self.window.copy_within(..INDICATOR_WIDTH - 1, 1);
+            self.window[0] = fresh;
+        }
+
+        let strip: String = self.window.iter().collect();
+
+        print!(
+            "\r{BRIGHT_GREEN}▸ streaming {DIM_GREEN}[{strip}]{RESET} {BRIGHT_GREEN}{} pkts{RESET}\x1b[K",
+            self.packet_count
+        );
 
         let _ = io::stdout().flush();
+    }
+
+    /// Перевод строки после серии in-place перерисовок — вызывать
+    /// перед любым обычным println!, чтобы не склеивался с
+    /// содержимым индикатора (например, перед "PONG N" или перед
+    /// сообщением об остановке).
+    pub fn finish_line(&self) {
+        println!();
     }
 }
