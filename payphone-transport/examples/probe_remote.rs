@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("connecting to {server_address} ...");
 
-    let endpoint = create_client_endpoint(key, false)?;
+    let endpoint = create_client_endpoint(key, false, None)?;
 
     let connecting = endpoint.connect(server_address, SERVER_NAME)?;
 

@@ -112,7 +112,7 @@ mod tests {
         });
 
         let client_endpoint =
-            create_client_endpoint(key, true).expect("client endpoint creation failed");
+            create_client_endpoint(key, true, None).expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
@@ -156,8 +156,8 @@ mod tests {
         // деобфусцируется валидным passphrase.
         let server_task = tokio::spawn(async move { server_endpoint.accept().await });
 
-        let client_endpoint =
-            create_client_endpoint(client_key, true).expect("client endpoint creation failed");
+        let client_endpoint = create_client_endpoint(client_key, true, None)
+            .expect("client endpoint creation failed");
 
         let client_result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -211,7 +211,7 @@ mod tests {
         });
 
         let client_endpoint =
-            create_client_endpoint(key, true).expect("client endpoint creation failed");
+            create_client_endpoint(key, true, None).expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)

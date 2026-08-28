@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    net::{SocketAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::Path,
     time::Duration,
 };
@@ -140,6 +140,10 @@ async fn send_frame(
         Ok(()) => Ok(true),
 
         Err(quinn::SendDatagramError::TooLarge) => Ok(false),
+
+        Err(quinn::SendDatagramError::ConnectionLost(error)) => {
+            Err(format!("QUIC connection lost: {error}").into())
+        }
 
         Err(error) => Err(error.into()),
     }
@@ -366,7 +370,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // QUIC/TLS.
     //
-    let endpoint = create_client_endpoint(obfuscation_key, dev_mode)?;
+    let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
+
+    let endpoint = create_client_endpoint(obfuscation_key, dev_mode, bind_ip)?;
 
     let connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
 
@@ -434,7 +440,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     let tun_name = tun.name()?;
 
-    let _full_tunnel =
+    let full_tunnel =
         match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
             Ok(guard) => {
                 matrix::status(
@@ -551,7 +557,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .read_datagram()
             => {
                 let bytes =
-                    result?;
+                    match result {
+                        Ok(bytes) => bytes,
+
+                        Err(error) => {
+                            flow.finish_line();
+
+                            return Err(
+                                format!(
+                                    "QUIC connection lost: {error}"
+                                )
+                                .into()
+                            );
+                        }
+                    };
 
                 let frame =
                     match Frame::decode(
@@ -679,6 +698,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame_sequence =
                     frame_sequence
                         .wrapping_add(1);
+            }
+
+
+            _ =
+                time::sleep(Duration::from_secs(2))
+            => {
+                if let Some(ref guard) = full_tunnel {
+                    guard.ensure_server_bypass();
+                }
             }
 
 

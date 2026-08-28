@@ -146,6 +146,9 @@ pub struct FullTunnelGuard {
     tun_name: String,
 
     #[cfg(target_os = "macos")]
+    physical_iface: String,
+
+    #[cfg(target_os = "macos")]
     ipv6_service: Option<String>,
 
     #[cfg(target_os = "macos")]
@@ -164,41 +167,54 @@ impl FullTunnelGuard {
 
         let original_gateway = macos::default_gateway()?;
 
-        //
-        // Явный host route к самому серверу через исходный
-        // gateway — иначе его же QUIC-пакеты попытаются уйти
-        // в TUN и получится петля.
-        //
-        macos::run_route(&[
-            "add",
-            "-inet",
-            "-host",
-            &server_ip.to_string(),
-            &original_gateway.to_string(),
-        ])?;
+        let physical_iface = macos::default_interface()?;
 
         //
-        // Next-hop 10.77.0.1 (the utun peer), not `-interface`.
-        // On macOS a /1 route bound only to the interface often
-        // shows up in netstat but is ignored for real sockets —
-        // IPv4 then keeps using the ISP default, which is why
-        // 2ip still showed the home address with the tunnel "up".
+        // networksetup пересобирает таблицу маршрутов. Если сначала
+        // поставить /1 и host-route, macOS их сотрёт — QUIC к серверу
+        // пойдёт в TUN и соединение умрёт. Сначала DNS/IPv6, потом
+        // маршруты туннеля.
         //
+        let ipv6_service = macos::disable_ipv6_on_default_service();
+
+        let dns_restore = macos::pin_dns_through_tunnel();
+
+        macos::add_host_bypass(server_ip, original_gateway, &physical_iface)?;
+
         macos::run_route(&["add", "-inet", "-net", "0.0.0.0/1", TUNNEL_GATEWAY])?;
 
         macos::run_route(&["add", "-inet", "-net", "128.0.0.0/1", TUNNEL_GATEWAY])?;
 
-        let ipv6_service = macos::disable_ipv6_on_default_service();
-
-        let dns_restore = macos::pin_dns_through_tunnel();
+        macos::add_host_bypass(server_ip, original_gateway, &physical_iface)?;
 
         Ok(Self {
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
+            physical_iface,
             ipv6_service,
             dns_restore,
         })
+    }
+
+    /// macOS periodically rebuilds routes (DHCP, networksetup,
+    /// sleep). If the /32 bypass to the VPN server disappears,
+    /// QUIC is swallowed by the TUN and the session dies.
+    pub fn ensure_server_bypass(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            if macos::host_route_ok(self.server_ip, self.original_gateway) {
+                return;
+            }
+
+            let _ =
+                macos::add_host_bypass(self.server_ip, self.original_gateway, &self.physical_iface);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self;
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -224,6 +240,8 @@ impl FullTunnelGuard {
             original_gateway,
             tun_name: tun_name.to_string(),
             #[cfg(target_os = "macos")]
+            physical_iface: String::new(),
+            #[cfg(target_os = "macos")]
             ipv6_service: None,
             #[cfg(target_os = "macos")]
             dns_restore: None,
@@ -242,14 +260,6 @@ impl Drop for FullTunnelGuard {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            if let Some((service, servers)) = self.dns_restore.take() {
-                macos::restore_dns(&service, &servers);
-            }
-
-            if let Some(service) = self.ipv6_service.take() {
-                let _ = macos::run_networksetup(&["-setv6automatic", &service]);
-            }
-
             let _ = self.tun_name.as_str();
 
             let _ = macos::run_route(&["delete", "-inet", "-net", "128.0.0.0/1", TUNNEL_GATEWAY]);
@@ -258,11 +268,22 @@ impl Drop for FullTunnelGuard {
 
             let _ = macos::run_route(&[
                 "delete",
+                "-ifscope",
+                &self.physical_iface,
                 "-inet",
                 "-host",
                 &self.server_ip.to_string(),
-                &self.original_gateway.to_string(),
             ]);
+
+            let _ = macos::run_route(&["delete", "-inet", "-host", &self.server_ip.to_string()]);
+
+            if let Some((service, servers)) = self.dns_restore.take() {
+                macos::restore_dns(&service, &servers);
+            }
+
+            if let Some(service) = self.ipv6_service.take() {
+                let _ = macos::run_networksetup(&["-setv6automatic", &service]);
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -316,14 +337,80 @@ mod macos {
         let output = Command::new("route").args(args).output()?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if stderr.contains("File exists") || stderr.contains("not in table") {
+                return Ok(());
+            }
+
             return Err(io::Error::other(format!(
                 "route {} failed: {}",
                 args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
+                stderr
             )));
         }
 
         Ok(())
+    }
+
+    pub fn add_host_bypass(server_ip: IpAddr, gateway: IpAddr, iface: &str) -> io::Result<()> {
+        let dest = server_ip.to_string();
+
+        let gw = gateway.to_string();
+
+        let _ = run_route(&["delete", "-ifscope", iface, "-inet", "-host", &dest]);
+
+        let _ = run_route(&["delete", "-inet", "-host", &dest]);
+
+        run_route(&["add", "-ifscope", iface, "-inet", "-host", &dest, &gw])
+    }
+
+    pub fn host_route_ok(server_ip: IpAddr, expected_gateway: IpAddr) -> bool {
+        let output = Command::new("route")
+            .args(["-n", "get", "-inet", &server_ip.to_string()])
+            .output();
+
+        let Ok(output) = output else {
+            return false;
+        };
+
+        if !output.status.success() {
+            return false;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        let mut gateway = None;
+
+        let mut iface = None;
+
+        for line in text.lines() {
+            let line = line.trim();
+
+            if let Some(value) = line.strip_prefix("gateway:") {
+                gateway = Some(value.trim().to_string());
+            }
+
+            if let Some(value) = line.strip_prefix("interface:") {
+                iface = Some(value.trim().to_string());
+            }
+        }
+
+        let Some(gateway) = gateway else {
+            return false;
+        };
+
+        if gateway.parse::<IpAddr>().ok() != Some(expected_gateway) {
+            return false;
+        }
+
+        if let Some(iface) = iface {
+            if iface.starts_with("utun") || iface == "lo0" {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub fn run_networksetup(args: &[&str]) -> io::Result<String> {
@@ -340,7 +427,7 @@ mod macos {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn default_interface() -> io::Result<String> {
+    pub fn default_interface() -> io::Result<String> {
         let output = Command::new("route")
             .args(["-n", "get", "default"])
             .output()?;
@@ -495,4 +582,28 @@ mod linux_route {
 
         Ok(())
     }
+}
+
+/// IPv4 of the current default interface — bind the QUIC socket
+/// here so the kernel sources packets from the LAN NIC even if a
+/// default route later points at utun.
+pub fn default_outbound_ipv4() -> Option<std::net::Ipv4Addr> {
+    #[cfg(target_os = "macos")]
+    {
+        let iface = macos::default_interface().ok()?;
+
+        let output = std::process::Command::new("ipconfig")
+            .args(["getifaddr", &iface])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    None
 }

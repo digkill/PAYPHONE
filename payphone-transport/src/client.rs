@@ -22,6 +22,7 @@ use crate::{
 pub fn create_client_endpoint(
     obfuscation_key: ObfuscationKey,
     dev_mode: bool,
+    bind_ip: Option<IpAddr>,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
     //
     // Читаем certificate PAYPHONE server.
@@ -59,7 +60,7 @@ pub fn create_client_endpoint(
     // "операционная система,
     // выбери свободный UDP port".
     //
-    let bind_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let bind_address = SocketAddr::new(bind_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), 0);
 
     //
     // Сами биндим UDP socket и оборачиваем его в ObfuscatedSocket —
