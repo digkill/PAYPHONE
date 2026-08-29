@@ -195,6 +195,15 @@ impl ObfuscationKey {
     // MAX_PADDING про то, почему не бакеты).
     //
     pub fn obfuscate(&self, payload: &[u8]) -> io::Result<Vec<u8>> {
+        self.obfuscate_padded(payload, random_pad_len())
+    }
+
+    /// Same as [`Self::obfuscate`], but the padding length is chosen by the
+    /// caller. GSO needs every segment in a batch to grow by the same amount
+    /// so UDP_SEGMENT still sees equal-sized chunks.
+    pub fn obfuscate_padded(&self, payload: &[u8], pad_len: usize) -> io::Result<Vec<u8>> {
+        let pad_len = pad_len.min(MAX_PADDING);
+
         let mut salt = [0u8; SALT_LEN];
 
         fill_random(&mut salt);
@@ -205,8 +214,6 @@ impl ObfuscationKey {
             .len()
             .try_into()
             .map_err(|_| io::Error::other("payload too large to obfuscate (> 65535 bytes)"))?;
-
-        let pad_len = random_pad_len();
 
         let mut padding = vec![0u8; pad_len];
 
@@ -235,6 +242,10 @@ impl ObfuscationKey {
         );
 
         Ok(out)
+    }
+
+    pub(crate) fn gso_pad_len() -> usize {
+        random_pad_len()
     }
 
     //
@@ -377,6 +388,25 @@ mod tests {
 
             assert_eq!(plain, payload);
         }
+    }
+
+    #[test]
+    fn fixed_pad_keeps_gso_segments_equal() {
+        let key = ObfuscationKey::from_passphrase("test-passphrase");
+
+        let a = vec![0x11u8; 400];
+
+        let b = vec![0x22u8; 400];
+
+        let first = key.obfuscate_padded(&a, 7).expect("obfuscate");
+
+        let second = key.obfuscate_padded(&b, 7).expect("obfuscate");
+
+        assert_eq!(first.len(), second.len());
+
+        assert_eq!(key.deobfuscate(&first).expect("plain a"), a.as_slice());
+
+        assert_eq!(key.deobfuscate(&second).expect("plain b"), b.as_slice());
     }
 
     #[test]

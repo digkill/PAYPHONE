@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use quinn::{Connection, Endpoint};
+use quinn::Connection;
 use tokio::{signal, sync::mpsc, time};
 
 use payphone_core::{
@@ -9,7 +9,9 @@ use payphone_core::{
     pong::Pong,
 };
 use payphone_transport::https_front::TlsFrameWriter;
-use payphone_tun::{PAYPHONE_MTU, create_client_tun};
+use payphone_tun::{
+    PAYPHONE_MTU, PAYPHONE_MTU_MAX, create_client_tun, mtu_from_datagram_budget, set_interface_mtu,
+};
 
 use crate::{ActiveSession, matrix};
 
@@ -32,12 +34,29 @@ impl VpnSink {
             }
         }
     }
+
+    fn tun_mtu(&self) -> u16 {
+        match self {
+            Self::Quic(connection) => connection
+                .max_datagram_size()
+                .map(mtu_from_datagram_budget)
+                .unwrap_or(PAYPHONE_MTU),
+
+            Self::Tls(_) => PAYPHONE_MTU_MAX,
+        }
+    }
+}
+
+pub enum TunnelExit {
+    Stopped,
+
+    Disconnected,
+
+    Denied(String),
 }
 
 pub struct QuicShutdown {
     pub connection: Connection,
-
-    pub endpoint: Endpoint,
 }
 
 pub async fn run_tunnel(
@@ -46,17 +65,14 @@ pub async fn run_tunnel(
     sink: VpnSink,
     mut incoming: mpsc::Receiver<Frame>,
     quic: Option<QuicShutdown>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let tun = create_client_tun(
-        active.assigned_ipv4,
-        if active.mtu == 0 {
-            PAYPHONE_MTU
-        } else {
-            active.mtu
-        },
-    )?;
+) -> Result<TunnelExit, Box<dyn std::error::Error>> {
+    let mut tun_mtu = sink.tun_mtu();
+
+    let tun = create_client_tun(active.assigned_ipv4, tun_mtu)?;
 
     crate::matrix::status("PAYPHONE TUN created");
+
+    matrix::status(&format!("VPN MTU: {tun_mtu}"));
 
     let tun_name = tun.name()?;
 
@@ -125,8 +141,20 @@ pub async fn run_tunnel(
                     payload: data.encode(),
                 };
 
-                if sink.send(frame.encode()).await? {
-                    flow.pulse('▸');
+                match sink.send(frame.encode()).await {
+                    Ok(true) => flow.pulse('▸'),
+
+                    Ok(false) => {}
+
+                    Err(_) => {
+                        flow.finish_line();
+
+                        drop(full_tunnel.take());
+
+                        close_quic(quic).await;
+
+                        return Ok(TunnelExit::Disconnected);
+                    }
                 }
 
                 packet_id = packet_id.wrapping_add(1);
@@ -140,7 +168,9 @@ pub async fn run_tunnel(
 
                     drop(full_tunnel.take());
 
-                    return Err("PAYPHONE connection closed".into());
+                    close_quic(quic).await;
+
+                    return Ok(TunnelExit::Disconnected);
                 };
 
                 match frame.frame_type {
@@ -171,9 +201,12 @@ pub async fn run_tunnel(
 
                         drop(full_tunnel.take());
 
-                        return Err(
-                            format!("PAYPHONE access revoked: {:?}", denied.reason).into(),
-                        );
+                        close_quic(quic).await;
+
+                        return Ok(TunnelExit::Denied(format!(
+                            "PAYPHONE access revoked: {:?}",
+                            denied.reason
+                        )));
                     }
 
                     _ => {}
@@ -191,7 +224,7 @@ pub async fn run_tunnel(
                     payload: ping.encode(),
                 };
 
-                let _ = sink.send(frame.encode()).await?;
+                let _ = sink.send(frame.encode()).await;
 
                 ping_id = ping_id.wrapping_add(1);
 
@@ -207,7 +240,9 @@ pub async fn run_tunnel(
 
                 matrix::status("Internet restored");
 
-                break;
+                close_quic(quic).await;
+
+                return Ok(TunnelExit::Stopped);
             }
 
             _ = rain_tick.tick() => {
@@ -218,17 +253,23 @@ pub async fn run_tunnel(
                 if let Some(ref guard) = full_tunnel {
                     guard.ensure_tunnel_routes();
                 }
+
+                let next_mtu = sink.tun_mtu();
+
+                if next_mtu != tun_mtu {
+                    set_interface_mtu(tun.as_ref(), next_mtu);
+
+                    tun_mtu = next_mtu;
+
+                    matrix::status(&format!("VPN MTU: {tun_mtu}"));
+                }
             }
         }
     }
+}
 
-    drop(full_tunnel.take());
-
+async fn close_quic(quic: Option<QuicShutdown>) {
     if let Some(quic) = quic {
         quic.connection.close(0u32.into(), b"client shutdown");
-
-        let _ = time::timeout(Duration::from_millis(800), quic.endpoint.wait_idle()).await;
     }
-
-    Ok(())
 }

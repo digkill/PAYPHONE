@@ -7,7 +7,7 @@ pub mod server;
 
 use std::{sync::Arc, time::Duration};
 
-use quinn::TransportConfig;
+use quinn::{AckFrequencyConfig, MtuDiscoveryConfig, TransportConfig, VarInt, congestion::BbrConfig};
 
 /// QUIC transport for a long-lived VPN, not a short web request.
 ///
@@ -21,13 +21,19 @@ use quinn::TransportConfig;
 pub fn vpn_transport_config() -> TransportConfig {
     let mut transport = TransportConfig::default();
 
+    //
+    // Quiet VPN + NAT/DPI blips. Quinn's 30s idle is far too
+    // aggressive: a Wi-Fi roam or a 40s UDP hole punch gap used
+    // to kill the QUIC connection while the TUN routes were still
+    // up. 3 minutes of idle, with QUIC keepalives well under that.
+    //
     transport.max_idle_timeout(Some(
-        Duration::from_secs(120)
+        Duration::from_secs(180)
             .try_into()
-            .expect("120s is within QUIC idle-timeout bounds"),
+            .expect("180s is within QUIC idle-timeout bounds"),
     ));
 
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    transport.keep_alive_interval(Some(Duration::from_secs(3)));
 
     //
     // Quinn defaults to 333ms (RFC 9002) before the first sample.
@@ -35,18 +41,52 @@ pub fn vpn_transport_config() -> TransportConfig {
     // pessimistic makes slow-start crawl and the tunnel feels
     // "protocol-slow" even on an empty path.
     //
-    transport.initial_rtt(Duration::from_millis(80));
+    transport.initial_rtt(Duration::from_millis(50));
+
+    //
+    // Don't declare persistent congestion after a short DPI drop
+    // or a single PTO burst — that collapses BBR's window and the
+    // tunnel feels "dead" for seconds. Default is 3 PTOs.
+    //
+    transport.persistent_congestion_threshold(6);
+
+    //
+    // Wi-Fi reordering looks like loss at threshold 3. One extra
+    // packet before fast-retransmit avoids spurious BBR backoff.
+    //
+    transport.packet_threshold(4);
+
+    let mut mtu_discovery = MtuDiscoveryConfig::default();
+
+    mtu_discovery.interval(Duration::from_secs(20));
+    mtu_discovery.black_hole_cooldown(Duration::from_secs(10));
+    mtu_discovery.upper_bound(1452);
+
+    transport.mtu_discovery_config(Some(mtu_discovery));
+
+    let mut ack_frequency = AckFrequencyConfig::default();
+
+    ack_frequency.ack_eliciting_threshold(VarInt::from_u32(2));
+    ack_frequency.max_ack_delay(Some(Duration::from_millis(10)));
+
+    transport.ack_frequency_config(Some(ack_frequency));
 
     //
     // Cubic treats loss as congestion and backs off hard — inner
     // TCP then also backs off (double control loop). BBR paces to
     // measured bandwidth and recovers faster on Wi-Fi / DPI drops.
     //
-    transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
 
-    transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
+    transport.datagram_receive_buffer_size(Some(8 * 1024 * 1024));
 
-    transport.datagram_send_buffer_size(2 * 1024 * 1024);
+    transport.datagram_send_buffer_size(8 * 1024 * 1024);
+
+    //
+    // ObfuscatedSocket now speaks GSO/GRO; leave Quinn's offload
+    // on so bulk TUN traffic is one syscall per batch on Linux.
+    //
+    transport.enable_segmentation_offload(true);
 
     transport
 }
@@ -91,7 +131,7 @@ pub(crate) fn tune_udp_buffers(socket: &std::net::UdpSocket) {
 
         let fd = socket.as_raw_fd();
 
-        let size = (4 * 1024 * 1024) as libc::c_int;
+        let size = (8 * 1024 * 1024) as libc::c_int;
 
         let len = std::mem::size_of_val(&size) as libc::socklen_t;
 

@@ -35,7 +35,26 @@ pub const PAYPHONE_PREFIX: u8 = 24;
 /// 1100 держит худший случай (1100 + 40 = 1140 байт) внутри
 /// гарантированного бюджета quinn без всякой зависимости от того,
 /// успела ли отработать MTU discovery.
+///
+/// После path-MTU клиент поднимает TUN выше, до `PAYPHONE_MTU_MAX`.
 pub const PAYPHONE_MTU: u16 = 1100;
+
+/// Ceiling once QUIC path-MTU (or the TLS stream) has more budget
+/// than the RFC 9000 floor. 1400 stays under a typical 1500 Ethernet
+/// path after outer UDP/TLS headers; IPv6's 1280 minimum is still
+/// above the safe QUIC floor, which is why in-tunnel IPv6 waits.
+pub const PAYPHONE_MTU_MAX: u16 = 1450;
+
+/// Frame header + Data header, subtracted from Quinn's datagram
+/// budget to get a TUN MTU.
+pub const PAYPHONE_FRAME_OVERHEAD: u16 = 40;
+
+/// TUN MTU that fits in a QUIC datagram of `max_datagram` bytes.
+pub fn mtu_from_datagram_budget(max_datagram: usize) -> u16 {
+    let usable = max_datagram.saturating_sub(PAYPHONE_FRAME_OVERHEAD as usize);
+
+    usable.clamp(PAYPHONE_MTU as usize, PAYPHONE_MTU_MAX as usize) as u16
+}
 
 /// IPv4 PAYPHONE server внутри VPN.
 ///
@@ -54,7 +73,7 @@ pub const SERVER_TUN_IPV4: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 /// QUIC -> TUN.
 pub type SharedTun = Arc<AsyncDevice>;
 
-fn force_interface_mtu(device: &AsyncDevice, mtu: u16) {
+pub fn set_interface_mtu(device: &AsyncDevice, mtu: u16) {
     //
     // tun-rs asks for an MTU, but on macOS the utun sometimes
     // keeps a 1500-byte kernel MTU. Those packets become PAYPHONE
@@ -104,7 +123,7 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
     //
     let device = builder.build_async()?;
 
-    force_interface_mtu(&device, mtu);
+    set_interface_mtu(&device, mtu);
 
     Ok(Arc::new(device))
 }
@@ -117,14 +136,21 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
 pub fn create_server_tun() -> io::Result<SharedTun> {
     let builder = DeviceBuilder::new()
         .ipv4(SERVER_TUN_IPV4, PAYPHONE_PREFIX, None::<Ipv4Addr>)
-        .mtu(PAYPHONE_MTU);
+        .mtu(PAYPHONE_MTU_MAX);
 
     #[cfg(target_os = "linux")]
     let builder = builder.name("payphone0");
 
     let device = builder.build_async()?;
 
-    force_interface_mtu(&device, PAYPHONE_MTU);
+    //
+    // Shared TUN: MSS clamp follows this interface. Keep it at
+    // the ceiling so a client that grew its own UTUN after PMTUD
+    // can actually receive large TCP segments. Datagrams that
+    // still don't fit a given QUIC path are dropped in
+    // `send_vpn_datagram` (TooLarge), not by the TUN MTU.
+    //
+    set_interface_mtu(&device, PAYPHONE_MTU_MAX);
 
     Ok(Arc::new(device))
 }
@@ -193,5 +219,14 @@ mod tests {
         assert_eq!(ipv4_source(&packet), Some([10, 77, 0, 2]));
 
         assert_eq!(ipv4_destination(&packet), Some([1, 1, 1, 1]));
+    }
+
+    #[test]
+    fn datagram_budget_stays_inside_quic_floor_and_ceiling() {
+        assert_eq!(mtu_from_datagram_budget(1140), PAYPHONE_MTU);
+        assert_eq!(mtu_from_datagram_budget(1154), 1114);
+        assert_eq!(mtu_from_datagram_budget(1440), 1400);
+        assert_eq!(mtu_from_datagram_budget(1490), PAYPHONE_MTU_MAX);
+        assert_eq!(mtu_from_datagram_budget(40), PAYPHONE_MTU);
     }
 }

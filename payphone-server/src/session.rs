@@ -17,7 +17,7 @@ use payphone_core::{
 
 pub type SessionId = [u8; SESSION_ID_SIZE];
 
-pub const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
+pub const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug)]
 pub enum ClientLink {

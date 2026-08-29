@@ -86,7 +86,7 @@ async fn serve_connection(
 
     let stream_id = stream_ids.fetch_add(1, Ordering::Relaxed);
 
-    let (tx, mut rx) = mpsc::channel::<Bytes>(256);
+    let (tx, mut rx) = mpsc::channel::<Bytes>(1024);
 
     let (mut reader, mut writer) = tokio::io::split(stream);
 

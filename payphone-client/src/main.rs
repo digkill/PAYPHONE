@@ -29,7 +29,7 @@ use payphone_transport::{
 mod matrix;
 mod tunnel;
 
-use tunnel::{QuicShutdown, VpnSink, run_tunnel};
+use tunnel::{QuicShutdown, TunnelExit, VpnSink, run_tunnel};
 
 // =============================================================
 // CONFIG
@@ -430,101 +430,161 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     matrix::banner();
 
-    let (active, sink, incoming, quic, tunnel_host) = match transport {
-        TransportKind::Quic => {
-            let bind_iface = payphone_tun::routing::default_physical_interface();
+    let bind_iface = payphone_tun::routing::default_physical_interface();
 
-            let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
+    let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
 
-            let endpoint =
-                create_client_endpoint(obfuscation_key, dev_mode, bind_ip, bind_iface.as_deref())?;
+    let quic_endpoint = match transport {
+        TransportKind::Quic => Some(create_client_endpoint(
+            obfuscation_key,
+            dev_mode,
+            bind_ip,
+            bind_iface.as_deref(),
+        )?),
 
-            let mut connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
-
-            matrix::status("QUIC + TLS 1.3 connected");
-
-            let active = establish_session(&mut connection).await?;
-
-            let (tx, rx) = mpsc::channel(256);
-
-            let reader = connection.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    match reader.read_datagram().await {
-                        Ok(bytes) => {
-                            if let Ok(frame) = Frame::decode(bytes) {
-                                if tx.send(frame).await.is_err() {
-                                    break;
-                                }
-                            }
-                        }
-
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            (
-                active,
-                VpnSink::Quic(connection.clone()),
-                rx,
-                Some(QuicShutdown {
-                    connection,
-                    endpoint,
-                }),
-                server_address,
-            )
-        }
-
-        TransportKind::Tls => {
-            let tls_address = tls_connect_address(server_address)?;
-
-            let mut session = TlsClientSession::connect(tls_address).await?;
-
-            matrix::status("TLS 1.3 connected (HTTPS front)");
-
-            let active = establish_session(&mut session).await?;
-
-            let (mut reader, writer) = session.into_split();
-
-            let (tx, rx) = mpsc::channel(256);
-
-            tokio::spawn(async move {
-                loop {
-                    match read_payphone_frame(&mut reader).await {
-                        Ok(frame) => {
-                            if tx.send(frame).await.is_err() {
-                                break;
-                            }
-                        }
-
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            (
-                active,
-                VpnSink::Tls(writer),
-                rx,
-                None,
-                tls_address,
-            )
-        }
+        TransportKind::Tls => None,
     };
 
-    matrix::status(&format!(
-        "VPN IPv4: {}.{}.{}.{}",
-        active.assigned_ipv4[0],
-        active.assigned_ipv4[1],
-        active.assigned_ipv4[2],
-        active.assigned_ipv4[3],
-    ));
+    let mut connected_once = false;
 
-    matrix::status(&format!("VPN MTU: {}", active.mtu));
+    loop {
+        let session = match transport {
+            TransportKind::Quic => {
+                let endpoint = quic_endpoint.as_ref().expect("QUIC endpoint");
 
-    matrix::status(&format!("Capabilities: {}", active.capabilities));
+                connect_quic(endpoint, server_address).await
+            }
 
-    run_tunnel(active, tunnel_host, sink, incoming, quic).await
+            TransportKind::Tls => connect_tls(server_address).await,
+        };
+
+        let (active, sink, incoming, quic, tunnel_host) = match session {
+            Ok(parts) => parts,
+
+            Err(error) if connected_once => {
+                matrix::status(&format!("Reconnect failed ({error}), retrying"));
+
+                time::sleep(Duration::from_secs(1)).await;
+
+                continue;
+            }
+
+            Err(error) => return Err(error),
+        };
+
+        connected_once = true;
+
+        matrix::status(&format!(
+            "VPN IPv4: {}.{}.{}.{}",
+            active.assigned_ipv4[0],
+            active.assigned_ipv4[1],
+            active.assigned_ipv4[2],
+            active.assigned_ipv4[3],
+        ));
+
+        matrix::status(&format!("Capabilities: {}", active.capabilities));
+
+        match run_tunnel(active, tunnel_host, sink, incoming, quic).await? {
+            TunnelExit::Stopped => return Ok(()),
+
+            TunnelExit::Denied(reason) => return Err(reason.into()),
+
+            TunnelExit::Disconnected => {
+                matrix::status("Link lost, reconnecting");
+
+                time::sleep(Duration::from_millis(400)).await;
+            }
+        }
+    }
+}
+
+const INCOMING_FRAMES: usize = 1024;
+
+async fn connect_quic(
+    endpoint: &quinn::Endpoint,
+    server_address: SocketAddr,
+) -> Result<
+    (
+        ActiveSession,
+        VpnSink,
+        mpsc::Receiver<Frame>,
+        Option<QuicShutdown>,
+        SocketAddr,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let mut connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
+
+    matrix::status("QUIC + TLS 1.3 connected");
+
+    let active = establish_session(&mut connection).await?;
+
+    let (tx, rx) = mpsc::channel(INCOMING_FRAMES);
+
+    let reader = connection.clone();
+
+    tokio::spawn(async move {
+        loop {
+            match reader.read_datagram().await {
+                Ok(bytes) => {
+                    if let Ok(frame) = Frame::decode(bytes) {
+                        if tx.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok((
+        active,
+        VpnSink::Quic(connection.clone()),
+        rx,
+        Some(QuicShutdown { connection }),
+        server_address,
+    ))
+}
+
+async fn connect_tls(
+    server_address: SocketAddr,
+) -> Result<
+    (
+        ActiveSession,
+        VpnSink,
+        mpsc::Receiver<Frame>,
+        Option<QuicShutdown>,
+        SocketAddr,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let tls_address = tls_connect_address(server_address)?;
+
+    let mut session = TlsClientSession::connect(tls_address).await?;
+
+    matrix::status("TLS 1.3 connected (HTTPS front)");
+
+    let active = establish_session(&mut session).await?;
+
+    let (mut reader, writer) = session.into_split();
+
+    let (tx, rx) = mpsc::channel(INCOMING_FRAMES);
+
+    tokio::spawn(async move {
+        loop {
+            match read_payphone_frame(&mut reader).await {
+                Ok(frame) => {
+                    if tx.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok((active, VpnSink::Tls(writer), rx, None, tls_address))
 }
