@@ -1,10 +1,7 @@
 use std::{io, sync::Arc};
 
 use bytes::Bytes;
-use rustls::{
-    ClientConfig, RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName},
-};
+use rustls::{ClientConfig, ServerConfig, pki_types::ServerName};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split},
     net::TcpStream,
@@ -17,7 +14,7 @@ use tokio_rustls::{
 
 use payphone_core::{Frame, HEADER_SIZE, PROTOCOL_VERSION};
 
-use crate::identity::{CERT_PATH, KEY_PATH, SERVER_NAME};
+use crate::identity::{ClientTlsConfig, ServerTlsConfig, client_root_store, load_server_tls};
 
 pub const HTTP_ALPN: &[u8] = b"http/1.1";
 
@@ -71,32 +68,28 @@ pub fn looks_like_http(first: u8) -> bool {
     first != PROTOCOL_VERSION
 }
 
-pub fn tls_server_acceptor() -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+pub fn tls_server_acceptor(
+    tls: &ServerTlsConfig,
+) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
     ensure_crypto_provider();
 
-    crate::identity::ensure_dev_identity()?;
-
-    let certificate = CertificateDer::from(std::fs::read(CERT_PATH)?);
-
-    let key = PrivatePkcs8KeyDer::from(std::fs::read(KEY_PATH)?);
+    let (certificates, private_key) = load_server_tls(tls)?;
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![certificate], key.into())?;
+        .with_single_cert(certificates, private_key)?;
 
     config.alpn_protocols = vec![HTTP_ALPN.to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-pub fn tls_client_connector() -> Result<TlsConnector, Box<dyn std::error::Error>> {
+pub fn tls_client_connector(
+    tls: &ClientTlsConfig,
+) -> Result<TlsConnector, Box<dyn std::error::Error>> {
     ensure_crypto_provider();
 
-    let certificate = CertificateDer::from(std::fs::read(CERT_PATH)?);
-
-    let mut roots = RootCertStore::empty();
-
-    roots.add(certificate)?;
+    let roots = client_root_store(tls)?;
 
     let mut config = ClientConfig::builder()
         .with_root_certificates(roots)
@@ -107,8 +100,8 @@ pub fn tls_client_connector() -> Result<TlsConnector, Box<dyn std::error::Error>
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-pub fn tls_server_name() -> Result<ServerName<'static>, Box<dyn std::error::Error>> {
-    ServerName::try_from(SERVER_NAME.to_string()).map_err(|error| error.into())
+pub fn tls_server_name(name: &str) -> Result<ServerName<'static>, Box<dyn std::error::Error>> {
+    ServerName::try_from(name.to_string()).map_err(|error| error.into())
 }
 
 pub async fn read_payphone_frame<R>(reader: &mut R) -> io::Result<Frame>
@@ -187,13 +180,16 @@ pub struct TlsFrameWriter {
 }
 
 impl TlsClientSession {
-    pub async fn connect(address: std::net::SocketAddr) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn connect(
+        address: std::net::SocketAddr,
+        tls: &ClientTlsConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let tcp = TcpStream::connect(address).await?;
 
         tcp.set_nodelay(true)?;
 
-        let tls = tls_client_connector()?
-            .connect(tls_server_name()?, tcp)
+        let tls = tls_client_connector(tls)?
+            .connect(tls_server_name(&tls.server_name)?, tcp)
             .await?;
 
         let (read, write) = split(tls);

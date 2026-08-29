@@ -1,7 +1,8 @@
 use std::{
-    env, fs,
+    fs,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
-    path::Path,
+    path::PathBuf,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -23,13 +24,16 @@ use payphone_core::{
 use payphone_transport::{
     client::create_client_endpoint,
     https_front::{TlsClientSession, read_payphone_frame},
-    identity::SERVER_NAME,
+    identity::ClientTlsConfig,
     obfuscation::ObfuscationKey,
 };
 
 mod matrix;
+mod session_file;
+mod settings;
 mod tunnel;
 
+use settings::TransportKind;
 use tunnel::{QuicShutdown, TunnelExit, VpnSink, run_tunnel};
 
 // =============================================================
@@ -53,19 +57,9 @@ const PING_INTERVAL_MIN: Duration = Duration::from_secs(7);
 
 const PING_INTERVAL_JITTER: Duration = Duration::from_secs(7);
 
-const SESSION_FILE: &str = ".payphone-session";
-
-const SUBSCRIPTION_FILE: &str = "subscription.token";
-
 // =============================================================
 // SAVED / ACTIVE SESSION
 // =============================================================
-
-struct SavedSession {
-    session_id: [u8; SESSION_ID_SIZE],
-
-    resume_token: [u8; SERVER_NONCE_SIZE],
-}
 
 #[derive(Clone)]
 pub(crate) struct ActiveSession {
@@ -87,38 +81,23 @@ pub(crate) fn save_session(
 
     resume_token: [u8; SERVER_NONCE_SIZE],
 ) -> std::io::Result<()> {
-    let mut data = Vec::with_capacity(SESSION_ID_SIZE + SERVER_NONCE_SIZE);
-
-    data.extend_from_slice(&session_id);
-
-    data.extend_from_slice(&resume_token);
-
-    fs::write(SESSION_FILE, data)
-}
-
-fn load_session() -> Option<SavedSession> {
-    let data = fs::read(SESSION_FILE).ok()?;
-
-    if data.len() != SESSION_ID_SIZE + SERVER_NONCE_SIZE {
-        return None;
-    }
-
-    let mut session_id = [0u8; SESSION_ID_SIZE];
-
-    session_id.copy_from_slice(&data[..SESSION_ID_SIZE]);
-
-    let mut resume_token = [0u8; SERVER_NONCE_SIZE];
-
-    resume_token.copy_from_slice(&data[SESSION_ID_SIZE..]);
-
-    Some(SavedSession {
-        session_id,
-        resume_token,
-    })
+    session_file::save(session_id, resume_token)
 }
 
 pub(crate) fn forget_session() {
-    let _ = fs::remove_file(SESSION_FILE);
+    session_file::forget();
+}
+
+struct Runtime {
+    token: PathBuf,
+    tls: ClientTlsConfig,
+    tcp_server: Option<String>,
+}
+
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn runtime() -> &'static Runtime {
+    RUNTIME.get().expect("client runtime is not initialized")
 }
 
 // =============================================================
@@ -161,24 +140,6 @@ impl HandshakeIo for TlsClientSession {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TransportKind {
-    Quic,
-    Tls,
-}
-
-fn transport_kind() -> Result<TransportKind, Box<dyn std::error::Error>> {
-    let value = env::var("PAYPHONE_TRANSPORT").unwrap_or_else(|_| "quic".into());
-
-    match value.to_ascii_lowercase().as_str() {
-        "quic" | "udp" => Ok(TransportKind::Quic),
-
-        "tls" | "https" | "tcp" => Ok(TransportKind::Tls),
-
-        other => Err(format!("unknown PAYPHONE_TRANSPORT={other}; use quic or tls").into()),
-    }
-}
-
 fn resolve_server_addr(setting: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     setting
         .to_socket_addrs()
@@ -192,8 +153,8 @@ fn resolve_server_addr(setting: &str) -> Result<SocketAddr, Box<dyn std::error::
 fn tls_connect_address(
     quic_address: SocketAddr,
 ) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    if let Ok(setting) = env::var("PAYPHONE_TCP_SERVER_ADDR") {
-        return resolve_server_addr(&setting);
+    if let Some(setting) = runtime().tcp_server.as_deref() {
+        return resolve_server_addr(setting);
     }
 
     if quic_address.port() == DEFAULT_PORT {
@@ -210,7 +171,7 @@ fn tls_connect_address(
 async fn try_resume<I: HandshakeIo>(
     io: &mut I,
 
-    saved: SavedSession,
+    saved: session_file::SavedSession,
 ) -> Result<Option<ActiveSession>, Box<dyn std::error::Error>> {
     matrix::status("Back again, dude?");
 
@@ -283,8 +244,8 @@ async fn create_new_session<I: HandshakeIo>(
     //
     // Настоящий подписочный token.
     //
-    let token = fs::read(SUBSCRIPTION_FILE)
-        .map_err(|error| format!("cannot read {}: {}", SUBSCRIPTION_FILE, error))?;
+    let token = fs::read(&runtime().token)
+        .map_err(|error| format!("cannot read {}: {}", runtime().token.display(), error))?;
 
     let whats_up = WhatsUpDude::new(CLIENT_VERSION, CLIENT_CAPABILITIES, Bytes::from(token));
 
@@ -340,8 +301,8 @@ async fn create_new_session<I: HandshakeIo>(
 async fn establish_session<I: HandshakeIo>(
     io: &mut I,
 ) -> Result<ActiveSession, Box<dyn std::error::Error>> {
-    if Path::new(SESSION_FILE).exists() {
-        match load_session() {
+    if session_file::exists() {
+        match session_file::load() {
             Some(saved) => match try_resume(io, saved).await? {
                 Some(session) => {
                     matrix::status("PAYPHONE SESSION RESUMED");
@@ -350,7 +311,7 @@ async fn establish_session<I: HandshakeIo>(
                 }
 
                 None => {
-                    let _ = fs::remove_file(SESSION_FILE);
+                    session_file::forget();
 
                     create_new_session(io).await
                 }
@@ -449,63 +410,47 @@ pub(crate) fn random_ping_interval() -> Duration {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //
-    // Подхватываем .env, если он есть.
-    //
-    // Переменные, уже выставленные в окружении
-    // (например, Docker Compose environment:),
-    // остаются в приоритете.
-    //
-    dotenvy::dotenv().ok();
+    let settings = settings::load_client_settings()?;
 
-    //
-    // По умолчанию — localhost, как раньше.
-    //
-    // В Docker Compose PAYPHONE_SERVER_ADDR=payphone-server:40404,
-    // имя сервиса резолвится через Docker DNS.
-    //
-    // TLS-имя (SERVER_NAME) остаётся "localhost",
-    // потому что dev-сертификат всегда выпущен на это имя.
-    //
-    let transport = transport_kind()?;
+    payphone_transport::obfuscation::validate_passphrase(&settings.psk)?;
 
-    let server_addr_setting =
-        env::var("PAYPHONE_SERVER_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", DEFAULT_PORT));
+    let obfuscation_key = ObfuscationKey::from_passphrase(&settings.psk);
 
-    let server_address = resolve_server_addr(&server_addr_setting)?;
+    session_file::init(settings.session.clone(), &settings.psk);
 
-    //
-    // Тот же общий пароль обфускации, что и на сервере —
-    // см. payphone_transport::obfuscation. TLS/HTTPS front does
-    // not XOR the TCP stream; the secret is still required so
-    // one .env works for both transports.
-    //
-    let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(
-        |_| "PAYPHONE_OBFS_PSK is not set; use the same secret configured on the server",
-    )?;
+    let _ = RUNTIME.set(Runtime {
+        token: settings.token.clone(),
+        tls: settings.tls.clone(),
+        tcp_server: settings.tcp_server.clone(),
+    });
 
-    payphone_transport::obfuscation::validate_passphrase(&obfuscation_passphrase)?;
-
-    let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
-
-    let dev_mode = env::var("PAYPHONE_DEV_MODE")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let server_address = resolve_server_addr(&settings.server)?;
 
     matrix::rain_intro();
 
     matrix::banner();
 
+    if settings.tls.use_webpki {
+        matrix::status(&format!("TLS SNI {} (public CA)", settings.tls.server_name));
+    } else {
+        matrix::status(&format!(
+            "TLS SNI {} pin {}",
+            settings.tls.server_name,
+            settings.tls.pin_path.display()
+        ));
+    }
+
     let bind_iface = payphone_tun::routing::default_physical_interface();
 
     let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
 
-    let quic_endpoint = match transport {
+    let quic_endpoint = match settings.transport {
         TransportKind::Quic => Some(create_client_endpoint(
             obfuscation_key,
-            dev_mode,
+            settings.dev_mode,
             bind_ip,
             bind_iface.as_deref(),
+            &settings.tls,
         )?),
 
         TransportKind::Tls => None,
@@ -514,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut connected_once = false;
 
     loop {
-        let session = match transport {
+        let session = match settings.transport {
             TransportKind::Quic => {
                 let endpoint = quic_endpoint.as_ref().expect("QUIC endpoint");
 
@@ -579,7 +524,9 @@ async fn connect_quic(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut connection = endpoint.connect(server_address, SERVER_NAME)?.await?;
+    let mut connection = endpoint
+        .connect(server_address, &runtime().tls.server_name)?
+        .await?;
 
     matrix::status("QUIC + TLS 1.3 connected");
 
@@ -628,7 +575,7 @@ async fn connect_tls(
 > {
     let tls_address = tls_connect_address(server_address)?;
 
-    let mut session = TlsClientSession::connect(tls_address).await?;
+    let mut session = TlsClientSession::connect(tls_address, &runtime().tls).await?;
 
     matrix::status("TLS 1.3 connected (HTTPS front)");
 

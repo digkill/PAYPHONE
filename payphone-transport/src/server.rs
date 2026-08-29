@@ -1,11 +1,9 @@
-use std::{fs, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use quinn::{Endpoint, EndpointConfig, ServerConfig, default_runtime};
 
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-
 use crate::{
-    identity::{CERT_PATH, KEY_PATH, ensure_dev_identity},
+    identity::{ServerTlsConfig, load_server_tls},
     obfuscated_socket::ObfuscatedSocket,
     obfuscation::ObfuscationKey,
 };
@@ -29,39 +27,11 @@ pub fn create_server_endpoint(
     address: SocketAddr,
     obfuscation_key: ObfuscationKey,
     dev_mode: bool,
+    tls: &ServerTlsConfig,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
-    //
-    // Сначала гарантируем,
-    // что certificate/key существуют.
-    //
-    ensure_dev_identity()?;
+    let (certificates, private_key) = load_server_tls(tls)?;
 
-    //
-    // Читаем certificate с диска.
-    //
-    let certificate_bytes = fs::read(CERT_PATH)?;
-
-    //
-    // Читаем private key.
-    //
-    let private_key_bytes = fs::read(KEY_PATH)?;
-
-    //
-    // Vec<u8>
-    //
-    // превращаем в тип,
-    // понятный rustls.
-    //
-    let certificate = CertificateDer::from(certificate_bytes);
-
-    let private_key = PrivatePkcs8KeyDer::from(private_key_bytes);
-
-    //
-    // Создаём QUIC server config.
-    //
-    // TLS уже является частью QUIC.
-    //
-    let mut server_config = ServerConfig::with_single_cert(vec![certificate], private_key.into())?;
+    let mut server_config = ServerConfig::with_single_cert(certificates, private_key)?;
 
     server_config.transport_config(crate::vpn_transport());
 

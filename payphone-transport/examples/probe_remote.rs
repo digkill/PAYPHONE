@@ -8,7 +8,7 @@
 use std::{env, net::ToSocketAddrs};
 
 use payphone_transport::{
-    client::create_client_endpoint, identity::SERVER_NAME, obfuscation::ObfuscationKey,
+    client::create_client_endpoint, identity::ClientTlsConfig, obfuscation::ObfuscationKey,
 };
 
 #[tokio::main]
@@ -22,11 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let psk = env::var("PAYPHONE_OBFS_PSK")?;
     let key = ObfuscationKey::from_passphrase(&psk);
 
+    let tls = ClientTlsConfig::from_env();
+
     println!("connecting to {server_address} ...");
 
-    let endpoint = create_client_endpoint(key, false, None, None)?;
+    let endpoint = create_client_endpoint(key, false, None, None, &tls)?;
 
-    let connecting = endpoint.connect(server_address, SERVER_NAME)?;
+    let connecting = endpoint.connect(server_address, &tls.server_name)?;
 
     let connection =
         match tokio::time::timeout(std::time::Duration::from_secs(15), connecting).await {

@@ -14,9 +14,12 @@ use tokio::{
 };
 
 use payphone_core::HEADER_SIZE;
-use payphone_transport::https_front::{
-    finish_payphone_frame, looks_like_http, read_payphone_frame, serve_camouflage_http,
-    tls_server_acceptor, write_payphone_bytes,
+use payphone_transport::{
+    https_front::{
+        finish_payphone_frame, looks_like_http, read_payphone_frame, serve_camouflage_http,
+        tls_server_acceptor, write_payphone_bytes,
+    },
+    identity::ServerTlsConfig,
 };
 use payphone_tun::SharedTun;
 
@@ -31,8 +34,9 @@ pub async fn run(
     verifier: Arc<PayphoneVerifier>,
     tun: SharedTun,
     stream_ids: Arc<AtomicU64>,
+    tls: ServerTlsConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let acceptor = tls_server_acceptor().map_err(|error| error.to_string())?;
+    let acceptor = tls_server_acceptor(&tls).map_err(|error| error.to_string())?;
 
     let listener = TcpListener::bind(bind).await?;
 

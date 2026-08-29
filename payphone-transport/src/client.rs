@@ -1,15 +1,14 @@
 use std::{
-    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
 use quinn::{ClientConfig, Endpoint, EndpointConfig, default_runtime};
 
-use rustls::{RootCertStore, pki_types::CertificateDer};
-
 use crate::{
-    identity::CERT_PATH, obfuscated_socket::ObfuscatedSocket, obfuscation::ObfuscationKey,
+    identity::{ClientTlsConfig, client_root_store},
+    obfuscated_socket::ObfuscatedSocket,
+    obfuscation::ObfuscationKey,
 };
 
 /// Создаёт PAYPHONE QUIC client endpoint.
@@ -24,33 +23,10 @@ pub fn create_client_endpoint(
     dev_mode: bool,
     bind_ip: Option<IpAddr>,
     bind_iface: Option<&str>,
+    tls: &ClientTlsConfig,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
-    //
-    // Читаем certificate PAYPHONE server.
-    //
-    // Если сервер ни разу не запускался,
-    // файла ещё не будет.
-    //
-    let certificate_bytes = fs::read(CERT_PATH)?;
+    let roots = client_root_store(tls)?;
 
-    let certificate = CertificateDer::from(certificate_bytes);
-
-    //
-    // RootCertStore —
-    // список сертификатов,
-    // которым доверяет клиент.
-    //
-    let mut roots = RootCertStore::empty();
-
-    //
-    // Добавляем именно наш
-    // PAYPHONE certificate.
-    //
-    roots.add(certificate)?;
-
-    //
-    // Создаём Quinn ClientConfig.
-    //
     let mut client_config = ClientConfig::with_root_certificates(Arc::new(roots))?;
 
     client_config.transport_config(crate::vpn_transport());

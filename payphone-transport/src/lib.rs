@@ -163,7 +163,7 @@ mod tests {
 
     use crate::{
         client::create_client_endpoint,
-        identity::{SERVER_NAME, ensure_dev_identity},
+        identity::{ClientTlsConfig, SERVER_NAME, ServerTlsConfig, ensure_dev_identity},
         obfuscation::ObfuscationKey,
         server::create_server_endpoint,
     };
@@ -184,7 +184,8 @@ mod tests {
         let key = ObfuscationKey::from_passphrase("test-obfuscation-passphrase");
 
         let endpoint =
-            create_server_endpoint(address, key, true).expect("endpoint creation failed");
+            create_server_endpoint(address, key, true, &ServerTlsConfig::default())
+                .expect("endpoint creation failed");
 
         let local_address = endpoint
             .local_addr()
@@ -213,8 +214,9 @@ mod tests {
 
         let key = ObfuscationKey::from_passphrase("matching-passphrase");
 
-        let server_endpoint = create_server_endpoint(address, key.clone(), true)
-            .expect("server endpoint creation failed");
+        let server_endpoint =
+            create_server_endpoint(address, key.clone(), true, &ServerTlsConfig::default())
+                .expect("server endpoint creation failed");
 
         let server_address = server_endpoint
             .local_addr()
@@ -229,8 +231,14 @@ mod tests {
             incoming.await.expect("server-side handshake failed")
         });
 
-        let client_endpoint =
-            create_client_endpoint(key, true, None, None).expect("client endpoint creation failed");
+        let client_endpoint = create_client_endpoint(
+            key,
+            true,
+            None,
+            None,
+            &ClientTlsConfig::default(),
+        )
+        .expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
@@ -262,8 +270,9 @@ mod tests {
 
         let client_key = ObfuscationKey::from_passphrase("different-client-passphrase");
 
-        let server_endpoint = create_server_endpoint(address, server_key, true)
-            .expect("server endpoint creation failed");
+        let server_endpoint =
+            create_server_endpoint(address, server_key, true, &ServerTlsConfig::default())
+                .expect("server endpoint creation failed");
 
         let server_address = server_endpoint
             .local_addr()
@@ -274,8 +283,14 @@ mod tests {
         // деобфусцируется валидным passphrase.
         let server_task = tokio::spawn(async move { server_endpoint.accept().await });
 
-        let client_endpoint = create_client_endpoint(client_key, true, None, None)
-            .expect("client endpoint creation failed");
+        let client_endpoint = create_client_endpoint(
+            client_key,
+            true,
+            None,
+            None,
+            &ClientTlsConfig::default(),
+        )
+        .expect("client endpoint creation failed");
 
         let client_result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -312,8 +327,9 @@ mod tests {
 
         let key = ObfuscationKey::from_passphrase("matching-passphrase");
 
-        let server_endpoint = create_server_endpoint(address, key.clone(), true)
-            .expect("server endpoint creation failed");
+        let server_endpoint =
+            create_server_endpoint(address, key.clone(), true, &ServerTlsConfig::default())
+                .expect("server endpoint creation failed");
 
         let server_address = server_endpoint
             .local_addr()
@@ -328,8 +344,14 @@ mod tests {
             incoming.await.expect("server-side handshake failed")
         });
 
-        let client_endpoint =
-            create_client_endpoint(key, true, None, None).expect("client endpoint creation failed");
+        let client_endpoint = create_client_endpoint(
+            key,
+            true,
+            None,
+            None,
+            &ClientTlsConfig::default(),
+        )
+        .expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)

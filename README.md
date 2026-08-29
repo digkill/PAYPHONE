@@ -5,7 +5,7 @@
 PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from a TUN interface inside QUIC datagrams, protects the transport with TLS 1.3, and authenticates new sessions with Ed25519-signed subscription tokens.
 
 > [!WARNING]
-> PAYPHONE is a development prototype, not a production-ready VPN. It currently uses self-signed development TLS credentials, and the resume token on the client is stored unencrypted.
+> PAYPHONE is a development prototype, not a production-ready VPN. Self-signed TLS is still the default; point `--tls-cert` / `--tls-ca system` at a public certificate when you have a real name.
 
 ## What works
 
@@ -15,6 +15,9 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - Ed25519-signed subscription tokens with validity periods and plan metadata
 - Server-side checks for signatures, activation time, expiry, signing key, and revocation
 - Capability negotiation during the initial handshake
+- CLI flags, `.env`, and optional `payphone.toml` for addresses, PSK, TLS, and token paths
+- TLS: pin a self-signed leaf, or load PEM and trust public CAs (`--tls-ca system`)
+- Encrypted client resume file (`.payphone-session`)
 - Logical sessions with addresses from `10.77.0.0/24`
 - Session resumption after a QUIC reconnect or a server restart (sessions are stored on disk)
 - Device and bandwidth limits from the subscription token
@@ -76,7 +79,8 @@ subscription.token                 # loaded by the client
 TUN creation may require elevated privileges:
 
 ```bash
-sudo ./target/debug/payphone-server
+sudo ./target/debug/payphone-server --help
+sudo ./target/debug/payphone-server --bind 0.0.0.0:40404
 ```
 
 The server:
@@ -91,8 +95,11 @@ The server:
 In another terminal:
 
 ```bash
-sudo ./target/debug/payphone-client
+sudo ./target/debug/payphone-client --help
+sudo ./target/debug/payphone-client --server 127.0.0.1:40404
 ```
+
+Flags override `.env` and an optional `payphone.toml` (`server`, `psk`, `sni`, `tls_pin`, `token`, ...). The PSK can stay in the environment.
 
 The client reads `subscription.token`, authenticates, receives an address beginning with `10.77.0.2`, creates its TUN interface, and starts forwarding packets. From a third terminal, try:
 
@@ -110,7 +117,7 @@ Stop only the client and start it again while the server remains running (or aft
 sudo ./target/debug/payphone-client
 ```
 
-The client stores a 48-byte session ID/resume-token pair in `.payphone-session`. If the session is still on disk on the server and the subscription has not expired, the server restores the same logical session and VPN address. Idle sessions expire after five minutes. `Ctrl+C` sends `Close` and drops the saved session on both sides.
+The client stores an encrypted session ID/resume-token pair in `.payphone-session` (ChaCha20-Poly1305, key derived from the obfuscation PSK). A leftover 48-byte plaintext file from older builds is still accepted once, then rewritten encrypted. If the session is still on disk on the server and the subscription has not expired, the server restores the same logical session and VPN address. Idle sessions expire after five minutes. `Ctrl+C` sends `Close` and drops the saved session on both sides.
 
 To force a new authenticated handshake, delete `.payphone-session` before starting the client.
 
@@ -120,7 +127,7 @@ The `Dockerfile` builds `server`, `client`, and `token` images from the same mul
 
 For a **remote server deployment** (e.g. behind a PaaS like Coolify), use `docker-compose.server.yml` instead of a platform's generic "port mapping" UI/API field. Many such tools default to TCP-only port publishing and either reject a `/udp` suffix outright or silently drop it — `docker ps` then shows the port as merely *exposed*, not actually published (`40404/udp` instead of `0.0.0.0:40404->40404/udp`), and UDP datagrams die at the host's network interface with zero visibility into why. A native Compose `ports: - "40404:40404/udp"` entry doesn't have this problem. The same file also publishes `443/tcp` → container `40443` for the HTTPS camouflage front. Set `PAYPHONE_BIND_ADDR`, `PAYPHONE_OBFS_PSK`, and `PAYPHONE_DEV_MODE` through the platform's own environment variable mechanism. Do not put PAYPHONE TCP/UDP 443 on a host that still has Traefik (or another proxy) bound to 443.
 
-Because the server's self-signed dev certificate regenerates on every redeploy (it isn't persisted across container restarts), the client's pinned `dev-certs/payphone-cert.der` needs updating after each redeploy. The server logs its own certificate as hex on startup for exactly this purpose — copy that value into the client's `dev-certs/payphone-cert.der`:
+Because the default self-signed certificate lives on the `payphone-certs` volume, the client's pin stays valid across rebuilds. After the first deploy (or if you delete the volume), copy the leaf hex from the server log into `dev-certs/payphone-cert.der`:
 
 ```bash
 echo <hex from server logs> | xxd -r -p > dev-certs/payphone-cert.der
@@ -302,8 +309,7 @@ cargo fmt --all -- --check
 - Full-tunnel routing (`payphone_tun::routing`) is only implemented for macOS and Linux; other platforms only reach 10.77.0.0/24.
 - Token revocations are stored only in memory.
 - Session sequence numbers are recorded but not currently enforced as an anti-replay mechanism.
-- There is no production configuration or command-line interface for addresses, ports, paths, or trusted keys.
 
 ## Security notice
 
-The generated TLS certificate is self-signed. The client trusts the certificate file directly, the resume token is stored unencrypted in `.payphone-session`, and the development key paths are local files. Keep `auth-keys/subscription-private.key` secret, do not distribute it with the server or client, and do not use the current credential handling unchanged in production.
+The default TLS identity is still self-signed with SNI `localhost`; the client pins `dev-certs/payphone-cert.der`. For a public name, load a Let's Encrypt PEM with `--tls-cert` / `--tls-key` on the server and `--sni your.domain --tls-ca system` on the client. The resume file is encrypted with a key derived from `PAYPHONE_OBFS_PSK`. Keep `auth-keys/subscription-private.key` secret.

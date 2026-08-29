@@ -6,9 +6,9 @@
 # docker-compose "ports:" entry with the /udp suffix is the only
 # reliable way to get Coolify to actually publish a UDP port.
 #
-# Env vars (PAYPHONE_BIND_ADDR, PAYPHONE_OBFS_PSK, PAYPHONE_DEV_MODE)
-# are injected by Coolify's own application environment settings,
-# not hardcoded here.
+# Env vars (PAYPHONE_BIND_ADDR, PAYPHONE_OBFS_PSK, PAYPHONE_DEV_MODE,
+# PAYPHONE_TLS_CERT, PAYPHONE_TLS_KEY, PAYPHONE_TLS_SAN) are injected
+# by Coolify's own application environment settings, not hardcoded here.
 #
 # Host port defaults to 443 (same port real HTTP/3 and HTTPS use)
 # rather than a random high port, per the anti-fingerprinting plan:

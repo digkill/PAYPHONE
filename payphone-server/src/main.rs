@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -19,7 +19,11 @@ use payphone_core::{
     DEFAULT_PORT, DEFAULT_TCP_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data,
 };
 
-use payphone_transport::{obfuscation::ObfuscationKey, server::create_server_endpoint};
+use payphone_transport::{
+    identity::{load_certificates, load_server_tls},
+    obfuscation::ObfuscationKey,
+    server::create_server_endpoint,
+};
 
 use payphone_tun::{create_server_tun, ipv4_destination};
 
@@ -29,91 +33,58 @@ mod dns;
 mod handler;
 mod https;
 mod session;
+mod settings;
 
 use handler::handle_packet;
 use session::SessionManager;
+use settings::load_server_settings;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //
-    // Подхватываем .env, если он есть.
-    //
-    // Переменные, уже выставленные в окружении
-    // (например, Docker Compose environment:),
-    // остаются в приоритете.
-    //
-    dotenvy::dotenv().ok();
+    let settings = load_server_settings()?;
 
-    //
-    // По умолчанию — localhost, как раньше.
-    //
-    // В Docker Compose PAYPHONE_BIND_ADDR=0.0.0.0:40404,
-    // чтобы принимать соединения из других контейнеров.
-    //
-    let bind_addr =
-        env::var("PAYPHONE_BIND_ADDR").unwrap_or_else(|_| format!("127.0.0.1:{}", DEFAULT_PORT));
-
-    let address: SocketAddr = bind_addr
+    let address: SocketAddr = settings
+        .bind
         .parse()
-        .map_err(|error| format!("invalid PAYPHONE_BIND_ADDR {}: {}", bind_addr, error))?;
+        .map_err(|error| format!("invalid bind address {}: {}", settings.bind, error))?;
 
-    //
-    // Общий пароль для обфускации UDP-пакетов (см.
-    // payphone_transport::obfuscation). Обязателен: без него
-    // сервер и клиент не понимают друг друга на проводе, и
-    // публичный дефолт в коде свёл бы защиту от DPI-пробинга
-    // к нулю для любого, кто читает исходники.
-    //
-    let obfuscation_passphrase = env::var("PAYPHONE_OBFS_PSK").map_err(|_| {
-        "PAYPHONE_OBFS_PSK is not set; generate a secret and set it identically on client and server"
-    })?;
+    payphone_transport::obfuscation::validate_passphrase(&settings.psk)?;
 
-    payphone_transport::obfuscation::validate_passphrase(&obfuscation_passphrase)?;
+    let obfuscation_key = ObfuscationKey::from_passphrase(&settings.psk);
 
-    let obfuscation_key = ObfuscationKey::from_passphrase(&obfuscation_passphrase);
+    let tls = settings.tls.clone();
 
-    //
-    // Диагностическое логирование (сырые датаграммы до
-    // деобфускации). Выключено по умолчанию — тишина в ответ
-    // на нераспознанный трафик часть защиты от DPI-пробинга.
-    //
-    let dev_mode = env::var("PAYPHONE_DEV_MODE")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    load_server_tls(&tls)?;
 
-    //
-    // =========================================================
-    // QUIC
-    // =========================================================
-    //
-
-    let endpoint = create_server_endpoint(address, obfuscation_key, dev_mode)?;
+    let endpoint = create_server_endpoint(address, obfuscation_key, settings.dev_mode, &tls)?;
 
     println!("PAYPHONE server: {}", address);
 
     //
-    // Печатаем собственный (само-подписанный, публичный) сертификат
-    // в лог как hex. Сертификат — не секрет, в отличие от ключа,
-    // который его подписал и который никуда не уходит с этой машины.
+    // Self-signed pin: dump the leaf as hex so the operator can
+    // copy it into the client's pin file. A public-CA cert is
+    // already trusted by --tls-ca system; don't spam a chain.
     //
-    // Клиент пинит именно этот файл (`identity::CERT_PATH`), поэтому
-    // при первом подключении к новому серверу оператору нужно
-    // скопировать этот hex в `dev-certs/payphone-cert.der` на
-    // клиентской машине:
-    //
-    //   echo <hex> | xxd -r -p > dev-certs/payphone-cert.der
-    //
-    let certificate_bytes = fs::read(payphone_transport::identity::CERT_PATH)?;
+    if tls.uses_default_paths() {
+        let certificates = load_certificates(&tls.cert_path)?;
 
-    print!("PAYPHONE server certificate (hex, copy to client's dev-certs/payphone-cert.der): ");
+        print!("PAYPHONE server certificate (hex, copy to client's pin file): ");
 
-    for byte in &certificate_bytes {
-        print!("{:02x}", byte);
+        for byte in certificates[0].as_ref() {
+            print!("{:02x}", byte);
+        }
+
+        println!();
+    } else {
+        println!(
+            "PAYPHONE TLS: {} + {} (SAN {})",
+            tls.cert_path.display(),
+            tls.key_path.display(),
+            tls.sans.join(", ")
+        );
     }
-
-    println!();
 
     //
     // =========================================================
@@ -153,23 +124,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================
     //
 
-    let session_store = match env::var("PAYPHONE_SESSION_STORE") {
-        Ok(path) => PathBuf::from(path),
+    let session_store = match settings.session_store {
+        Some(path) => path,
 
-        Err(_) if Path::new("/app/state").is_dir() => PathBuf::from("/app/state/sessions.bin"),
+        None if Path::new("/app/state").is_dir() => PathBuf::from("/app/state/sessions.bin"),
 
-        Err(_) => PathBuf::from("payphone-sessions.bin"),
+        None => PathBuf::from("payphone-sessions.bin"),
     };
 
     let sessions = Arc::new(RwLock::new(SessionManager::with_store(session_store)));
 
-    //
-    // =========================================================
-    // AUTH
-    // =========================================================
-    //
-
-    let public_key = fs::read("auth-keys/subscription-public.key")?;
+    let public_key = fs::read(&settings.auth_key).map_err(|error| {
+        format!("cannot read {}: {error}", settings.auth_key.display())
+    })?;
 
     let public_key: [u8; 32] = public_key
         .try_into()
@@ -191,16 +158,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // clients speak the same frames over TLS after the handshake.
     // Set PAYPHONE_TCP_BIND_ADDR=off to disable.
     //
-    let tcp_bind = match env::var("PAYPHONE_TCP_BIND_ADDR") {
-        Ok(value) if value == "off" || value.eq_ignore_ascii_case("false") => None,
+    let tcp_bind = match settings.tcp_bind.as_deref() {
+        Some(value) if value == "off" || value.eq_ignore_ascii_case("false") => None,
 
-        Ok(value) => Some(
+        Some(value) => Some(
             value
                 .parse::<SocketAddr>()
-                .map_err(|error| format!("invalid PAYPHONE_TCP_BIND_ADDR {value}: {error}"))?,
+                .map_err(|error| format!("invalid TCP bind {value}: {error}"))?,
         ),
 
-        Err(_) => {
+        None => {
             let tcp_port = if address.port() == DEFAULT_PORT {
                 DEFAULT_TCP_PORT
             } else {
@@ -218,20 +185,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let verifier = Arc::clone(&verifier);
         let tun = Arc::clone(&tun);
         let stream_ids = Arc::clone(&stream_ids);
+        let tls = tls.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = https::run(tcp_bind, sessions, verifier, tun, stream_ids).await {
+            if let Err(error) = https::run(tcp_bind, sessions, verifier, tun, stream_ids, tls).await
+            {
                 eprintln!("PAYPHONE HTTPS front stopped: {error}");
             }
         });
     }
 
-    let dns_upstream = match env::var("PAYPHONE_DNS_UPSTREAM") {
-        Ok(value) => value.parse::<SocketAddr>().map_err(|error| {
-            format!("invalid PAYPHONE_DNS_UPSTREAM {value}: {error}")
+    let dns_upstream = match settings.dns_upstream {
+        Some(value) => value.parse::<SocketAddr>().map_err(|error| {
+            format!("invalid DNS upstream {value}: {error}")
         })?,
 
-        Err(_) => dns::default_upstream(),
+        None => dns::default_upstream(),
     };
 
     tokio::spawn(async move {

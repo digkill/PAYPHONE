@@ -12,6 +12,8 @@ quinn = { version = "0.11.11", features = [
 ] }
 
 rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 rcgen = "0.14"
 bytes = "1"
 sha2 = "0.11"
