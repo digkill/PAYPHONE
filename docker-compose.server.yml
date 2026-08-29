@@ -36,7 +36,12 @@ services:
       # Keep the self-signed identity across redeploys so the
       # client pin in dev-certs/payphone-cert.der stays valid.
       - payphone-certs:/app/dev-certs
+      # Resume tokens survive container replace / Coolify rebuild.
+      - payphone-state:/app/state
+    environment:
+      PAYPHONE_SESSION_STORE: /app/state/sessions.bin
     restart: unless-stopped
 
 volumes:
   payphone-certs:
+  payphone-state:

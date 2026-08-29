@@ -28,6 +28,8 @@ pub enum DenyReason {
     UnsupportedPlan = 6,
 
     InternalAuthError = 7,
+
+    DeviceLimitReached = 8,
 }
 
 impl TryFrom<u8> for DenyReason {
@@ -48,6 +50,8 @@ impl TryFrom<u8> for DenyReason {
             6 => Ok(Self::UnsupportedPlan),
 
             7 => Ok(Self::InternalAuthError),
+
+            8 => Ok(Self::DeviceLimitReached),
 
             _ => Err(FrameError::UnknownDenyReason(value)),
         }

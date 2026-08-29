@@ -15,6 +15,7 @@ use payphone_core::{
     access_denied_dude::AccessDeniedDude,
     all_good_dude::{AllGoodDude, SERVER_NONCE_SIZE, SESSION_ID_SIZE},
     back_again_dude::BackAgainDude,
+    rekey::Rekey,
     still_good_dude::StillGoodDude,
     whats_up_dude::{CAP_DNS, CAP_IPV4, CAP_IPV6, CAP_RESUME, CAP_ROAMING, WhatsUpDude},
 };
@@ -81,7 +82,7 @@ pub(crate) struct ActiveSession {
 // SESSION FILE
 // =============================================================
 
-fn save_session(
+pub(crate) fn save_session(
     session_id: [u8; SESSION_ID_SIZE],
 
     resume_token: [u8; SERVER_NONCE_SIZE],
@@ -114,6 +115,10 @@ fn load_session() -> Option<SavedSession> {
         session_id,
         resume_token,
     })
+}
+
+pub(crate) fn forget_session() {
+    let _ = fs::remove_file(SESSION_FILE);
 }
 
 // =============================================================
@@ -243,6 +248,8 @@ async fn try_resume<I: HandshakeIo>(
 
             matrix::status("Still good, dude.");
 
+            rotate_resume_token(io, saved.session_id).await;
+
             Ok(Some(ActiveSession {
                 session_id: message.session_id,
 
@@ -315,6 +322,8 @@ async fn create_new_session<I: HandshakeIo>(
 
     save_session(all_good.session_id, all_good.server_nonce)?;
 
+    rotate_resume_token(io, all_good.session_id).await;
+
     matrix::status("All good, dude.");
 
     Ok(ActiveSession {
@@ -351,6 +360,63 @@ async fn establish_session<I: HandshakeIo>(
         }
     } else {
         create_new_session(io).await
+    }
+}
+
+async fn rotate_resume_token<I: HandshakeIo>(
+    io: &mut I,
+    session_id: [u8; SESSION_ID_SIZE],
+) {
+    let request = Frame {
+        version: PROTOCOL_VERSION,
+        frame_type: FrameType::Rekey,
+        flags: 0,
+        sequence: 2,
+        payload: Rekey::request(session_id).encode(),
+    };
+
+    if io.send_wait(request.encode()).await.is_err() {
+        return;
+    }
+
+    let Ok(Ok(frame)) = time::timeout(Duration::from_secs(2), io.read_frame()).await else {
+        return;
+    };
+
+    let Ok(Rekey::Token {
+        session_id: id,
+        nonce,
+    }) = Rekey::decode(frame.payload)
+    else {
+        return;
+    };
+
+    if id != session_id {
+        return;
+    }
+
+    let _ = save_session(session_id, nonce);
+
+    let confirm = Frame {
+        version: PROTOCOL_VERSION,
+        frame_type: FrameType::Rekey,
+        flags: 0,
+        sequence: 3,
+        payload: Rekey::token(session_id, nonce).encode(),
+    };
+
+    let _ = io.send_wait(confirm.encode()).await;
+
+    if let Ok(Ok(frame)) = time::timeout(Duration::from_secs(2), io.read_frame()).await {
+        if let Ok(Rekey::Token {
+            session_id: id,
+            nonce,
+        }) = Rekey::decode(frame.payload)
+        {
+            if id == session_id {
+                let _ = save_session(session_id, nonce);
+            }
+        }
     }
 }
 

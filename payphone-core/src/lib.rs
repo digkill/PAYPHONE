@@ -6,9 +6,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub mod access_denied_dude;
 pub mod all_good_dude;
 pub mod back_again_dude;
+pub mod close;
 pub mod data;
 pub mod ping;
 pub mod pong;
+pub mod rekey;
 pub mod still_good_dude;
 pub mod whats_up_dude;
 
@@ -199,6 +201,15 @@ pub enum FrameError {
 
     #[error("unknown access deny reason: {0}")]
     UnknownDenyReason(u8),
+
+    #[error("invalid CLOSE length")]
+    InvalidCloseLength,
+
+    #[error("unknown close reason: {0}")]
+    UnknownCloseReason(u8),
+
+    #[error("invalid REKEY length")]
+    InvalidRekeyLength,
 }
 
 //

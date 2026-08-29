@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -152,7 +153,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================
     //
 
-    let sessions = Arc::new(RwLock::new(SessionManager::new()));
+    let session_store = match env::var("PAYPHONE_SESSION_STORE") {
+        Ok(path) => PathBuf::from(path),
+
+        Err(_) if Path::new("/app/state").is_dir() => PathBuf::from("/app/state/sessions.bin"),
+
+        Err(_) => PathBuf::from("payphone-sessions.bin"),
+    };
+
+    let sessions = Arc::new(RwLock::new(SessionManager::with_store(session_store)));
 
     //
     // =========================================================
@@ -310,20 +319,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         packet,
 
                                     Err(_) => {
-                                        let mut manager =
-                                            sessions.write().await;
+                        let mut manager =
+                            sessions.write().await;
 
-                                        let removed =
-                                            manager.remove_by_stable_id(
-                                                connection.stable_id(),
-                                            );
+                        let detached =
+                            manager.detach_by_stable_id(
+                                connection.stable_id(),
+                            );
 
-                                        if removed > 0 {
-                                            println!(
-                                                "Dropped {} session(s) after QUIC close",
-                                                removed
-                                            );
-                                        }
+                        if detached > 0 {
+                            println!(
+                                "Detached {} session(s) after QUIC close",
+                                detached
+                            );
+                        }
 
                                         break;
                                     }
@@ -409,13 +418,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .find_by_ipv4(
                                 destination
                             )
-                            .map(
+                            .and_then(
                                 |session| {
-                                    (
-                                        session.id,
-                                        session
-                                            .link
-                                            .clone(),
+                                    if !session
+                                        .rate
+                                        .allow(
+                                            size as u64,
+                                        )
+                                    {
+                                        return None;
+                                    }
+
+                                    Some(
+                                        (
+                                            session.id,
+                                            session
+                                                .link
+                                                .clone(),
+                                        )
                                     )
                                 }
                             )

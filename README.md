@@ -5,7 +5,7 @@
 PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from a TUN interface inside QUIC datagrams, protects the transport with TLS 1.3, and authenticates new sessions with Ed25519-signed subscription tokens.
 
 > [!WARNING]
-> PAYPHONE is a development prototype, not a production-ready VPN. It currently uses localhost-only networking, self-signed development TLS credentials, in-memory session state, and incomplete policy enforcement.
+> PAYPHONE is a development prototype, not a production-ready VPN. It currently uses self-signed development TLS credentials, and the resume token on the client is stored unencrypted.
 
 ## What works
 
@@ -16,7 +16,9 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - Server-side checks for signatures, activation time, expiry, signing key, and revocation
 - Capability negotiation during the initial handshake
 - Logical sessions with addresses from `10.77.0.0/24`
-- Session resumption after a QUIC reconnect
+- Session resumption after a QUIC reconnect or a server restart (sessions are stored on disk)
+- Device and bandwidth limits from the subscription token
+- `Close` on shutdown (frees the VPN address immediately) and `Rekey` (rotates the resume token)
 - Periodic `PING`/`PONG` keepalives
 - Source-address validation for packets received from clients
 - Concurrent client handling with Tokio
@@ -102,13 +104,13 @@ Press `Ctrl+C` to stop either process.
 
 ### 5. Test session resumption
 
-Stop only the client and start it again within 30 seconds while the server remains running:
+Stop only the client and start it again while the server remains running (or after a server restart, within five minutes):
 
 ```bash
 sudo ./target/debug/payphone-client
 ```
 
-The client stores a 48-byte session ID/resume-token pair in `.payphone-session`. If the session is still active and the subscription has not expired, the server restores the same logical session and VPN address. A server restart or 30 seconds of inactivity invalidates the saved session.
+The client stores a 48-byte session ID/resume-token pair in `.payphone-session`. If the session is still on disk on the server and the subscription has not expired, the server restores the same logical session and VPN address. Idle sessions expire after five minutes. `Ctrl+C` sends `Close` and drops the saved session on both sides.
 
 To force a new authenticated handshake, delete `.payphone-session` before starting the client.
 
@@ -154,7 +156,7 @@ Available plans currently encode these claims:
 | `pro` | 5 | 500 |
 | `unlimited` | 255 | 0 (unlimited) |
 
-Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. Device and bandwidth limits are recorded but not enforced yet.
+Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. The server enforces the device limit (oldest session is replaced) and the Mbps cap (inner IP packets over the limit are dropped).
 
 ## Wire obfuscation
 
@@ -257,8 +259,8 @@ Multi-byte integers use network byte order. Protocol version 1 supports these fr
 | 3 | `AllGoodDude` | Server to client | Accepts a session and assigns its address and resume secret |
 | 4 | `Ping` | Client to server | Keepalive request |
 | 5 | `Pong` | Server to client | Keepalive response |
-| 6 | `Rekey` | Both | Reserved; not implemented |
-| 7 | `Close` | Both | Reserved; not implemented |
+| 6 | `Rekey` | Both | Rotates the resume token; 16-byte request or 48-byte nonce |
+| 7 | `Close` | Both | Ends the session and frees its VPN address |
 | 8 | `BackAgainDude` | Client to server | Requests session resumption |
 | 9 | `StillGoodDude` | Server to client | Confirms session resumption |
 | 10 | `AccessDeniedDude` | Server to client | Reports token or subscription rejection |
@@ -285,7 +287,7 @@ Run the complete suite with:
 cargo test --workspace
 ```
 
-The workspace currently contains 35 passing unit tests covering frames, protocol messages, subscription authentication, session helpers, IPv4 parsing, TLS identity creation, and QUIC endpoint binding. The endpoint test must be allowed to open a local UDP socket.
+The workspace currently contains unit tests covering frames, protocol messages, subscription authentication, session persistence, device and bandwidth limits, IPv4 parsing, TLS identity creation, and QUIC endpoint binding. The endpoint test must be allowed to open a local UDP socket.
 
 Formatting can be checked with:
 
@@ -298,10 +300,8 @@ cargo fmt --all -- --check
 - Only IPv4 packets are routed; IPv6 and roaming are advertised by the client but not negotiated by the server.
 - The server runs a UDP DNS stub on `10.77.0.1:53` and the client pins that address, so DNS fails closed if the tunnel drops instead of leaking to the ISP. Browser DoH still bypasses the stub but rides the tunnel.
 - Full-tunnel routing (`payphone_tun::routing`) is only implemented for macOS and Linux; other platforms only reach 10.77.0.0/24.
-- `Rekey` and protocol-level `Close` are defined but not implemented.
-- Sessions and token revocations are stored only in memory.
+- Token revocations are stored only in memory.
 - Session sequence numbers are recorded but not currently enforced as an anti-replay mechanism.
-- Subscription device and bandwidth limits are not enforced.
 - There is no production configuration or command-line interface for addresses, ports, paths, or trusted keys.
 
 ## Security notice

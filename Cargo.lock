@@ -958,6 +958,7 @@ dependencies = [
  "payphone-transport",
  "payphone-tun",
  "quinn",
+ "rand 0.9.5",
  "tokio",
  "tokio-rustls",
 ]

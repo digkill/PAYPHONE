@@ -5,8 +5,8 @@ use quinn::Connection;
 use tokio::{signal, sync::mpsc, time};
 
 use payphone_core::{
-    Frame, FrameType, PROTOCOL_VERSION, access_denied_dude::AccessDeniedDude, data::Data, ping::Ping,
-    pong::Pong,
+    Frame, FrameType, PROTOCOL_VERSION, access_denied_dude::AccessDeniedDude,
+    close::{Close, CloseReason}, data::Data, ping::Ping, pong::Pong, rekey::Rekey,
 };
 use payphone_transport::https_front::TlsFrameWriter;
 use payphone_tun::{
@@ -194,8 +194,62 @@ pub async fn run_tunnel(
                         }
                     }
 
+                    FrameType::Rekey => {
+                        if let Ok(Rekey::Token {
+                            session_id,
+                            nonce,
+                        }) = Rekey::decode(frame.payload)
+                        {
+                            if session_id == active.session_id {
+                                let _ = crate::save_session(session_id, nonce);
+
+                                let confirm = Frame {
+                                    version: PROTOCOL_VERSION,
+                                    frame_type: FrameType::Rekey,
+                                    flags: 0,
+                                    sequence: frame_sequence,
+                                    payload: Rekey::token(session_id, nonce).encode(),
+                                };
+
+                                let _ = sink.send(confirm.encode()).await;
+
+                                frame_sequence = frame_sequence.wrapping_add(1);
+                            }
+                        }
+                    }
+
+                    FrameType::Close => {
+                        let close = Close::decode(frame.payload)?;
+
+                        if close.session_id != active.session_id {
+                            continue;
+                        }
+
+                        crate::forget_session();
+
+                        flow.finish_line();
+
+                        drop(full_tunnel.take());
+
+                        close_quic(quic).await;
+
+                        return Ok(match close.reason {
+                            CloseReason::Replaced => {
+                                TunnelExit::Denied("PAYPHONE session replaced by another device".into())
+                            }
+
+                            CloseReason::ServerShutdown => {
+                                TunnelExit::Denied("PAYPHONE server closed the session".into())
+                            }
+
+                            CloseReason::ClientShutdown => TunnelExit::Stopped,
+                        });
+                    }
+
                     FrameType::AccessDeniedDude => {
                         let denied = AccessDeniedDude::decode(frame.payload)?;
+
+                        crate::forget_session();
 
                         flow.finish_line();
 
@@ -235,6 +289,18 @@ pub async fn run_tunnel(
                 flow.finish_line();
 
                 matrix::status("Stopping PAYPHONE VPN");
+
+                let close = Frame {
+                    version: PROTOCOL_VERSION,
+                    frame_type: FrameType::Close,
+                    flags: 0,
+                    sequence: frame_sequence,
+                    payload: Close::new(active.session_id, CloseReason::ClientShutdown).encode(),
+                };
+
+                let _ = sink.send(close.encode()).await;
+
+                crate::forget_session();
 
                 drop(full_tunnel.take());
 

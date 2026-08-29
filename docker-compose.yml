@@ -12,6 +12,7 @@ services:
       # Wins over .env so the container always binds correctly
       # regardless of what PAYPHONE_BIND_ADDR is set to locally.
       PAYPHONE_BIND_ADDR: "0.0.0.0:40404"
+      PAYPHONE_SESSION_STORE: /app/state/sessions.bin
     ports:
       - "40404:40404/udp"
       - "40443:40443/tcp"
@@ -26,6 +27,7 @@ services:
       # Only the public key ever enters a container; the
       # private signing key stays on the host issuer machine.
       - ./auth-keys/subscription-public.key:/app/auth-keys/subscription-public.key:ro
+      - payphone-state:/app/state
     restart: unless-stopped
 
   payphone-client:
@@ -65,3 +67,6 @@ services:
     volumes:
       - ./auth-keys:/app/auth-keys
       - ./subscription.token:/app/subscription.token
+
+volumes:
+  payphone-state:

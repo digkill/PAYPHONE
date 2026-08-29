@@ -1,7 +1,7 @@
 use std::{
     net::SocketAddr,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -14,15 +14,17 @@ use payphone_core::{
     Frame, FrameType, PROTOCOL_VERSION,
     access_denied_dude::{AccessDeniedDude, DenyReason},
     back_again_dude::BackAgainDude,
+    close::{Close, CloseReason},
     data::Data,
     ping::Ping,
     pong::Pong,
+    rekey::Rekey,
     whats_up_dude::{CAP_DNS, CAP_IPV4, CAP_RESUME, WhatsUpDude},
 };
 
 use payphone_tun::{PAYPHONE_MTU, SharedTun, ipv4_source};
 
-use crate::session::{ClientLink, SessionManager};
+use crate::session::{ClientLink, CreateSessionError, SessionManager};
 
 const SERVER_CAPABILITIES: u32 = CAP_IPV4 | CAP_DNS | CAP_RESUME;
 
@@ -64,10 +66,12 @@ pub async fn handle_frame(
         | FrameType::AccessDeniedDude => {}
 
         FrameType::Rekey => {
-            println!("REKEY not implemented");
+            handle_rekey(link, sessions, client_address, frame).await;
         }
 
-        FrameType::Close => {}
+        FrameType::Close => {
+            handle_close(link, sessions, client_address, frame).await;
+        }
     }
 }
 
@@ -154,7 +158,7 @@ async fn handle_whats_up_dude(
 
     let capabilities = whats_up.capabilities & SERVER_CAPABILITIES;
 
-    let all_good = {
+    let created = {
         let mut manager = sessions.write().await;
 
         manager.create_session(
@@ -167,6 +171,22 @@ async fn handle_whats_up_dude(
             &claims,
         )
     };
+
+    let (all_good, kicked) = match created {
+        Ok(value) => value,
+
+        Err(CreateSessionError::NoAddresses) => {
+            send_access_denied(&link, sequence, DenyReason::InternalAuthError, 0).await;
+
+            return;
+        }
+    };
+
+    for kicked in kicked {
+        send_close(&kicked.link, kicked.id, CloseReason::Replaced).await;
+
+        println!("Kicked session {:02x?} (device limit)", kicked.id);
+    }
 
     let response = Frame {
         version: PROTOCOL_VERSION,
@@ -290,6 +310,10 @@ async fn handle_data(
             return;
         }
 
+        if !session.rate.allow(data.payload.len() as u64) {
+            return;
+        }
+
         if let Some(source) = ipv4_source(&data.payload) {
             if source != session.ipv4 {
                 eprintln!("Spoofed VPN source address");
@@ -327,21 +351,15 @@ async fn handle_ping(
         Err(_) => return,
     };
 
-    {
+    let rekey_nonce = {
         let mut manager = sessions.write().await;
 
-        let Some(session) = manager.get_mut(&ping.session_id) else {
-            return;
-        };
+        manager.touch_session(&ping.session_id, client_address, sequence)
+    };
 
-        if session.client_address != client_address {
-            return;
-        }
-
-        session.last_activity = Instant::now();
-
-        session.last_sequence = sequence;
-    }
+    let Some(rekey_nonce) = rekey_nonce else {
+        return;
+    };
 
     let pong = Pong::new(ping.session_id, ping.ping_id);
 
@@ -358,6 +376,10 @@ async fn handle_ping(
     };
 
     link.send(frame.encode()).await;
+
+    if let Some(nonce) = rekey_nonce {
+        send_rekey(&link, ping.session_id, nonce).await;
+    }
 }
 
 async fn send_access_denied(
@@ -381,6 +403,118 @@ async fn send_access_denied(
         sequence: sequence + 1,
 
         payload: denied.encode(),
+    };
+
+    link.send(frame.encode()).await;
+}
+
+async fn handle_rekey(
+    link: ClientLink,
+
+    sessions: Arc<RwLock<SessionManager>>,
+
+    client_address: SocketAddr,
+
+    frame: Frame,
+) {
+    let rekey = match Rekey::decode(frame.payload) {
+        Ok(rekey) => rekey,
+
+        Err(_) => return,
+    };
+
+    let session_id = rekey.session_id();
+
+    let nonce = {
+        let mut manager = sessions.write().await;
+
+        match rekey {
+            Rekey::Request { .. } => manager.rekey_offer(&session_id, client_address),
+
+            Rekey::Token { nonce, .. } => {
+                manager.rekey_confirm(&session_id, &nonce, client_address)
+            }
+        }
+    };
+
+    let Some(nonce) = nonce else {
+        return;
+    };
+
+    send_rekey(&link, session_id, nonce).await;
+}
+
+async fn handle_close(
+    link: ClientLink,
+
+    sessions: Arc<RwLock<SessionManager>>,
+
+    client_address: SocketAddr,
+
+    frame: Frame,
+) {
+    let close = match Close::decode(frame.payload) {
+        Ok(close) => close,
+
+        Err(_) => return,
+    };
+
+    let removed = {
+        let mut manager = sessions.write().await;
+
+        let matches = manager
+            .get(&close.session_id)
+            .is_some_and(|session| session.client_address == client_address);
+
+        if matches {
+            manager.remove(&close.session_id);
+
+            true
+        } else {
+            false
+        }
+    };
+
+    if !removed {
+        return;
+    }
+
+    send_close(&link, close.session_id, close.reason).await;
+
+    println!("Session {:02x?} closed ({:?})", close.session_id, close.reason);
+}
+
+async fn send_close(link: &ClientLink, session_id: [u8; 16], reason: CloseReason) {
+    let close = Close::new(session_id, reason);
+
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+
+        frame_type: FrameType::Close,
+
+        flags: 0,
+
+        sequence: 0,
+
+        payload: close.encode(),
+    };
+
+    link.send(frame.encode()).await;
+}
+
+async fn send_rekey(link: &ClientLink, session_id: [u8; 16], nonce: [u8; 32]) {
+    let rekey = Rekey::token(session_id, nonce);
+
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+
+        frame_type: FrameType::Rekey,
+
+        flags: 0,
+
+        sequence: 0,
+
+        payload: rekey.encode(),
     };
 
     link.send(frame.encode()).await;

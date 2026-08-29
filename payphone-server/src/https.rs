@@ -133,10 +133,10 @@ async fn serve_connection(
 
     write_task.abort();
 
-    let removed = sessions.write().await.remove_by_stream_id(stream_id);
+    let detached = sessions.write().await.detach_by_stream_id(stream_id);
 
-    if removed > 0 {
-        println!("Dropped {removed} TLS session(s) after TCP close");
+    if detached > 0 {
+        println!("Detached {detached} TLS session(s) after TCP close");
     }
 
     Ok(())

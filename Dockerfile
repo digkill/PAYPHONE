@@ -32,6 +32,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
+RUN mkdir -p /app/state
+
 COPY --from=builder /build/target/release/payphone-server /usr/local/bin/payphone-server
 
 # Verify-only key: safe to bake into the image. The private signing
