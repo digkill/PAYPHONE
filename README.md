@@ -296,7 +296,7 @@ cargo fmt --all -- --check
 ## Current limitations
 
 - Only IPv4 packets are routed; IPv6 and roaming are advertised by the client but not negotiated by the server.
-- The DNS capability bit is negotiated, but DNS configuration is not implemented — the client still uses whatever DNS servers it had before connecting.
+- The server runs a UDP DNS stub on `10.77.0.1:53` and the client pins that address, so DNS fails closed if the tunnel drops instead of leaking to the ISP. Browser DoH still bypasses the stub but rides the tunnel.
 - Full-tunnel routing (`payphone_tun::routing`) is only implemented for macOS and Linux; other platforms only reach 10.77.0.0/24.
 - `Rekey` and protocol-level `Close` are defined but not implemented.
 - Sessions and token revocations are stored only in memory.

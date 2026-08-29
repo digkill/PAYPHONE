@@ -236,6 +236,8 @@ impl FullTunnelGuard {
 
         linux_route::run_ip(&["route", "add", "128.0.0.0/1", "dev", tun_name])?;
 
+        linux_route::pin_dns(tun_name);
+
         Ok(Self {
             server_ip,
             original_gateway,
@@ -266,6 +268,8 @@ impl Drop for FullTunnelGuard {
 
         #[cfg(target_os = "linux")]
         {
+            linux_route::clear_dns(&self.tun_name);
+
             let _ = linux_route::run_ip(&["route", "del", "128.0.0.0/1", "dev", &self.tun_name]);
 
             let _ = linux_route::run_ip(&["route", "del", "0.0.0.0/1", "dev", &self.tun_name]);
@@ -385,6 +389,8 @@ mod macos {
         if !ipv6_blackholes_ok() {
             add_ipv6_blackholes();
         }
+
+        refresh_dns_scutil();
     }
 
     /// Unscoped /32 via the LAN gateway. `-ifscope` alone is not
@@ -524,12 +530,30 @@ mod macos {
     }
 
     pub fn pin_dns_scutil() {
-        scutil(
+        set_dns_scutil();
+
+        let _ = Command::new("killall")
+            .args(["-HUP", "mDNSResponder"])
+            .status();
+    }
+
+    pub fn refresh_dns_scutil() {
+        set_dns_scutil();
+    }
+
+    fn set_dns_scutil() {
+        //
+        // VPN-only resolver. 1.1.1.1 used to leak to the ISP if the
+        // /1 routes vanished; 10.77.0.1 is unreachable off-tunnel.
+        //
+        let dns = crate::SERVER_TUN_IPV4.to_string();
+
+        scutil(&format!(
             "d.init\n\
-             d.add ServerAddresses * 1.1.1.1 8.8.8.8\n\
+             d.add ServerAddresses * {dns}\n\
              d.add SupplementalMatchDomains * \"\"\n\
-             set State:/Network/Service/PAYPHONE/DNS\n",
-        );
+             set State:/Network/Service/PAYPHONE/DNS\n"
+        ));
     }
 
     pub fn clear_dns_scutil() {
@@ -646,6 +670,28 @@ mod linux_route {
         }
 
         Ok(())
+    }
+
+    pub fn pin_dns(tun_name: &str) {
+        let dns = crate::SERVER_TUN_IPV4.to_string();
+
+        let _ = Command::new("resolvectl")
+            .args(["dns", tun_name, &dns])
+            .status();
+
+        let _ = Command::new("resolvectl")
+            .args(["domain", tun_name, "~."])
+            .status();
+
+        let _ = Command::new("resolvectl")
+            .args(["default-route", tun_name, "yes"])
+            .status();
+    }
+
+    pub fn clear_dns(tun_name: &str) {
+        let _ = Command::new("resolvectl")
+            .args(["revert", tun_name])
+            .status();
     }
 }
 

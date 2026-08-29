@@ -24,6 +24,7 @@ use payphone_tun::{create_server_tun, ipv4_destination};
 
 use tokio::{signal, sync::RwLock, time};
 
+mod dns;
 mod handler;
 mod https;
 mod session;
@@ -215,6 +216,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+
+    let dns_upstream = match env::var("PAYPHONE_DNS_UPSTREAM") {
+        Ok(value) => value.parse::<SocketAddr>().map_err(|error| {
+            format!("invalid PAYPHONE_DNS_UPSTREAM {value}: {error}")
+        })?,
+
+        Err(_) => dns::default_upstream(),
+    };
+
+    tokio::spawn(async move {
+        if let Err(error) = dns::run(dns_upstream).await {
+            eprintln!("PAYPHONE DNS stub stopped: {error}");
+        }
+    });
 
     //
     // =========================================================
