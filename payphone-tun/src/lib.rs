@@ -88,6 +88,21 @@ pub fn set_interface_mtu(device: &AsyncDevice, mtu: u16) {
             .status();
     }
 
+    #[cfg(windows)]
+    if let Ok(name) = device.name() {
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                &name,
+                &format!("mtu={mtu}"),
+                "store=active",
+            ])
+            .status();
+    }
+
     let _ = (device, mtu);
 }
 
@@ -116,6 +131,13 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
     //
     #[cfg(target_os = "linux")]
     let builder = builder.name("payphone0");
+
+    //
+    // Windows: Wintun adapter name. Place `wintun.dll` next to the exe
+    // (from wireguard.com/install). Run the client as Administrator.
+    //
+    #[cfg(target_os = "windows")]
+    let builder = builder.name("payphone");
 
     //
     // На macOS имя вида utunN

@@ -5,8 +5,13 @@ use quinn::Connection;
 use tokio::{signal, sync::mpsc, time};
 
 use payphone_core::{
-    Frame, FrameType, PROTOCOL_VERSION, access_denied_dude::AccessDeniedDude,
-    close::{Close, CloseReason}, data::Data, ping::Ping, pong::Pong, rekey::Rekey,
+    Frame, FrameType, PROTOCOL_VERSION,
+    access_denied_dude::AccessDeniedDude,
+    close::{Close, CloseReason},
+    data::Data,
+    ping::Ping,
+    pong::Pong,
+    rekey::Rekey,
 };
 use payphone_transport::https_front::TlsFrameWriter;
 use payphone_tun::{
@@ -65,8 +70,9 @@ pub async fn run_tunnel(
     sink: VpnSink,
     mut incoming: mpsc::Receiver<Frame>,
     quic: Option<QuicShutdown>,
+    kill_switch: bool,
 ) -> Result<TunnelExit, Box<dyn std::error::Error>> {
-    let mut tun_mtu = sink.tun_mtu();
+    let mut tun_mtu = sink.tun_mtu().max(active.mtu);
 
     let tun = create_client_tun(active.assigned_ipv4, tun_mtu)?;
 
@@ -76,27 +82,36 @@ pub async fn run_tunnel(
 
     let tun_name = tun.name()?;
 
-    let mut full_tunnel =
-        match payphone_tun::routing::FullTunnelGuard::install(server_address, &tun_name) {
-            Ok(guard) => {
-                matrix::status(
-                    "Full-tunnel routing enabled (all traffic now goes through PAYPHONE)",
-                );
+    let mut full_tunnel = match payphone_tun::routing::FullTunnelGuard::install(
+        server_address,
+        &tun_name,
+        kill_switch,
+    ) {
+        Ok(guard) => {
+            matrix::status("Full-tunnel routing enabled (all traffic now goes through PAYPHONE)");
 
-                matrix::tunnel_open_banner();
+            matrix::tunnel_open_banner();
 
-                Some(guard)
-            }
+            Some(guard)
+        }
 
-            Err(error) => {
-                eprintln!(
-                    "Could not enable full-tunnel routing ({error}); \
+        Err(error) if kill_switch => {
+            return Err(format!(
+                "kill switch is on and full-tunnel routing failed ({error}); \
+                 refusing to stay up and leak"
+            )
+            .into());
+        }
+
+        Err(error) => {
+            eprintln!(
+                "Could not enable full-tunnel routing ({error}); \
                  only 10.77.0.0/24 will go through the VPN"
-                );
+            );
 
-                None
-            }
-        };
+            None
+        }
+    };
 
     matrix::status("Try: ping 10.77.0.1");
 
@@ -304,7 +319,11 @@ pub async fn run_tunnel(
 
                 drop(full_tunnel.take());
 
-                matrix::status("Internet restored");
+                if kill_switch {
+                    matrix::status("VPN down, kill switch still blocking Internet");
+                } else {
+                    matrix::status("Internet restored");
+                }
 
                 close_quic(quic).await;
 

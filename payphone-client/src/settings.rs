@@ -5,7 +5,10 @@ use std::{
 };
 
 use payphone_core::{DEFAULT_PORT, DEFAULT_TCP_PORT};
-use payphone_transport::identity::ClientTlsConfig;
+use payphone_transport::{
+    identity::ClientTlsConfig,
+    reality::{RealityClientConfig, dest_host, parse_32_bytes, parse_short_id},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
@@ -23,6 +26,7 @@ pub struct ClientSettings {
     pub session: PathBuf,
     pub tls: ClientTlsConfig,
     pub dev_mode: bool,
+    pub kill_switch: bool,
 }
 
 pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Error>> {
@@ -65,12 +69,14 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         file.get("tcp_server").map(String::as_str),
     ]);
 
-    let transport = parse_transport(&first([
-        cli.transport.as_deref(),
-        env_opt("PAYPHONE_TRANSPORT").as_deref(),
-        file.get("transport").map(String::as_str),
-    ])
-    .unwrap_or_else(|| "quic".into()))?;
+    let transport = parse_transport(
+        &first([
+            cli.transport.as_deref(),
+            env_opt("PAYPHONE_TRANSPORT").as_deref(),
+            file.get("transport").map(String::as_str),
+        ])
+        .unwrap_or_else(|| "quic".into()),
+    )?;
 
     let psk = first([
         cli.psk.as_deref(),
@@ -78,9 +84,7 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         file.get("psk").map(String::as_str),
         file.get("obfs_psk").map(String::as_str),
     ])
-    .ok_or(
-        "PAYPHONE_OBFS_PSK is not set; pass --psk or put it in .env / payphone.toml",
-    )?;
+    .ok_or("PAYPHONE_OBFS_PSK is not set; pass --psk or put it in .env / payphone.toml")?;
 
     let token = PathBuf::from(
         first([
@@ -102,13 +106,19 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
 
     let mut tls = ClientTlsConfig::default();
 
-    if let Some(name) = first([
+    let sni_explicit = first([
         cli.sni.as_deref(),
         env_opt("PAYPHONE_SERVER_NAME").as_deref(),
         file.get("sni").map(String::as_str),
         file.get("server_name").map(String::as_str),
-    ]) {
+    ]);
+
+    if let Some(name) = sni_explicit {
         tls.server_name = name;
+    } else if let Some(host) = payphone_transport::identity::hostname_from_addr(&server) {
+        if payphone_transport::identity::looks_like_public_dns_name(&host) {
+            tls.server_name = host;
+        }
     }
 
     if let Some(path) = first([
@@ -121,16 +131,57 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         tls.pin_path = PathBuf::from(path);
     }
 
-    if let Some(ca) = first([
+    let tls_ca = first([
         cli.tls_ca.as_deref(),
         env_opt("PAYPHONE_TLS_CA").as_deref(),
         file.get("tls_ca").map(String::as_str),
-    ]) {
+    ]);
+
+    if let Some(ca) = &tls_ca {
         tls.use_webpki = matches!(
             ca.to_ascii_lowercase().as_str(),
             "system" | "webpki" | "public" | "1" | "true"
         );
+    } else if payphone_transport::identity::looks_like_public_dns_name(&tls.server_name) {
+        tls.use_webpki = true;
     }
+
+    if let Some(pubkey) = first([
+        cli.reality_pubkey.as_deref(),
+        env_opt("PAYPHONE_REALITY_PUBLIC_KEY").as_deref(),
+        file.get("reality_public_key").map(String::as_str),
+        file.get("reality_pubkey").map(String::as_str),
+    ]) {
+        let short = first([
+            cli.reality_short_id.as_deref(),
+            env_opt("PAYPHONE_REALITY_SHORT_ID").as_deref(),
+            file.get("reality_short_id").map(String::as_str),
+        ])
+        .ok_or("REALITY public key is set; pass --reality-short-id / PAYPHONE_REALITY_SHORT_ID")?;
+
+        let server_name = first([
+            cli.reality_sni.as_deref(),
+            env_opt("PAYPHONE_REALITY_SNI").as_deref(),
+            file.get("reality_sni").map(String::as_str),
+            cli.sni.as_deref(),
+            env_opt("PAYPHONE_SERVER_NAME").as_deref(),
+        ])
+        .unwrap_or_else(|| tls.server_name.clone());
+
+        let server_name = dest_host(&server_name).unwrap_or(server_name);
+
+        tls.server_name = server_name.clone();
+        tls.reality = Some(RealityClientConfig {
+            public_key: parse_32_bytes(&pubkey)?,
+            short_id: parse_short_id(&short)?,
+            server_name,
+        });
+    }
+
+    let kill_switch = cli.kill_switch
+        || env_flag("PAYPHONE_KILL_SWITCH")
+        || file_flag(&file, "kill_switch")
+        || file_flag(&file, "killswitch");
 
     let dev_mode = cli.dev
         || env_flag("PAYPHONE_DEV_MODE")
@@ -146,6 +197,7 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         session,
         tls,
         dev_mode,
+        kill_switch,
     })
 }
 
@@ -165,9 +217,14 @@ Options:
   -t, --token PATH         subscription token (default subscription.token)
       --session PATH       encrypted resume file (default .payphone-session)
       --psk SECRET         obfuscation secret (or PAYPHONE_OBFS_PSK)
-      --sni NAME           TLS server name (default localhost)
+      --sni NAME           TLS server name (default: hostname from --server, else localhost)
       --tls-pin PATH       pinned certificate (default dev-certs/payphone-cert.der)
-      --tls-ca pin|system  pin a file, or trust public CAs (Let's Encrypt)
+      --tls-ca pin|system  pin a file, or trust public CAs (Let's Encrypt).
+                           Default system when SNI looks like a public DNS name.
+      --reality-pubkey HEX|PATH
+      --reality-short-id HEX
+      --reality-sni NAME   ClientHello SNI (dest hostname, not the pin SAN)
+      --kill-switch        no Internet unless the VPN is up (default off)
   -c, --config PATH        optional payphone.toml (also PAYPHONE_CONFIG)
       --dev                log raw UDP datagrams
   -h, --help
@@ -189,8 +246,12 @@ struct Cli {
     sni: Option<String>,
     tls_pin: Option<String>,
     tls_ca: Option<String>,
+    reality_pubkey: Option<String>,
+    reality_short_id: Option<String>,
+    reality_sni: Option<String>,
     config: Option<PathBuf>,
     dev: bool,
+    kill_switch: bool,
 }
 
 impl Cli {
@@ -208,8 +269,11 @@ impl Cli {
                 match flag {
                     "help" => cli.help = true,
                     "dev" => cli.dev = true,
+                    "kill-switch" => cli.kill_switch = true,
                     name => {
-                        let value = args.next().ok_or_else(|| format!("missing value for --{name}"))?;
+                        let value = args
+                            .next()
+                            .ok_or_else(|| format!("missing value for --{name}"))?;
                         cli.set_long(name, Some(value))?;
                     }
                 }
@@ -248,7 +312,11 @@ impl Cli {
         Ok(cli)
     }
 
-    fn set_long(&mut self, name: &str, value: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    fn set_long(
+        &mut self,
+        name: &str,
+        value: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let value = value.ok_or_else(|| format!("missing value for --{name}"))?;
 
         match name {
@@ -261,6 +329,12 @@ impl Cli {
             "sni" => self.sni = Some(value),
             "tls-pin" => self.tls_pin = Some(value),
             "tls-ca" => self.tls_ca = Some(value),
+            "reality-pubkey" | "reality-public-key" => self.reality_pubkey = Some(value),
+            "reality-short-id" => self.reality_short_id = Some(value),
+            "reality-sni" => self.reality_sni = Some(value),
+            "kill-switch" => {
+                self.kill_switch = parse_bool_flag(&value)?;
+            }
             "config" => self.config = Some(PathBuf::from(value)),
             other => return Err(format!("unknown option --{other}").into()),
         }
@@ -292,7 +366,11 @@ pub fn load_kv_file(path: &Path) -> Result<HashMap<String, String>, Box<dyn std:
             .replace('-', "_")
             .to_ascii_lowercase();
 
-        let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
 
         map.insert(key, value);
     }
@@ -315,7 +393,11 @@ fn parse_transport(value: &str) -> Result<TransportKind, Box<dyn std::error::Err
 }
 
 fn first<const N: usize>(values: [Option<&str>; N]) -> Option<String> {
-    values.into_iter().flatten().find(|value| !value.is_empty()).map(str::to_string)
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -324,12 +406,21 @@ fn env_opt(name: &str) -> Option<String> {
 
 fn env_flag(name: &str) -> bool {
     env::var(name)
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .ok()
+        .and_then(|value| parse_bool_flag(&value).ok())
         .unwrap_or(false)
 }
 
 fn file_flag(file: &HashMap<String, String>, key: &str) -> bool {
     file.get(key)
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .and_then(|value| parse_bool_flag(value).ok())
         .unwrap_or(false)
+}
+
+fn parse_bool_flag(value: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Ok(true),
+        "0" | "false" | "off" | "no" => Ok(false),
+        other => Err(format!("expected on/off, got {other}").into()),
+    }
 }

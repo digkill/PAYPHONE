@@ -1,5 +1,8 @@
 use std::{
     collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,11 +21,8 @@ pub const CLOCK_SKEW_SECONDS: u64 = 300;
 
 /// Revocation store.
 ///
-/// Production реализация позже
-/// будет Redis/PostgreSQL.
-///
-/// Этот интерфейс оставляем
-/// уже сейчас.
+/// `FileRevocationStore` is the on-disk implementation the server uses.
+/// Redis/PostgreSQL can still sit behind this trait later.
 pub trait RevocationStore: Send + Sync {
     fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool;
 }
@@ -57,6 +57,87 @@ impl RevocationStore for MemoryRevocationStore {
     fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool {
         self.revoked.contains(token_id)
     }
+}
+
+// =============================================================
+// FILE REVOCATION STORE
+// =============================================================
+
+/// One hex token_id per line. Missing file = empty set. Re-reads when mtime changes.
+pub struct FileRevocationStore {
+    path: PathBuf,
+    cache: Mutex<(Option<SystemTime>, HashSet<[u8; TOKEN_ID_SIZE]>)>,
+}
+
+impl FileRevocationStore {
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            cache: Mutex::new((None, HashSet::new())),
+        }
+    }
+}
+
+impl RevocationStore for FileRevocationStore {
+    fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool {
+        let mtime = fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+
+        if cache.0 != mtime {
+            cache.1 = load_revoked_ids(&self.path);
+            cache.0 = mtime;
+        }
+
+        cache.1.contains(token_id)
+    }
+}
+
+pub fn load_revoked_ids(path: &Path) -> HashSet<[u8; TOKEN_ID_SIZE]> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+
+    text.lines().filter_map(parse_token_id_hex).collect()
+}
+
+pub fn append_revoked_id(path: &Path, token_id: [u8; TOKEN_ID_SIZE]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let hex = token_id_hex(&token_id);
+    let existing = load_revoked_ids(path);
+
+    if existing.contains(&token_id) {
+        return Ok(());
+    }
+
+    let mut text = fs::read_to_string(path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&hex);
+    text.push('\n');
+    fs::write(path, text)
+}
+
+pub fn token_id_hex(token_id: &[u8; TOKEN_ID_SIZE]) -> String {
+    token_id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn parse_token_id_hex(line: &str) -> Option<[u8; TOKEN_ID_SIZE]> {
+    let hex = line.trim().trim_start_matches("0x");
+    if hex.len() != TOKEN_ID_SIZE * 2 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let mut id = [0u8; TOKEN_ID_SIZE];
+    for (i, slot) in id.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(id)
 }
 
 // =============================================================

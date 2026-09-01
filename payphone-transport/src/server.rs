@@ -1,11 +1,10 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use quinn::{Endpoint, EndpointConfig, ServerConfig, default_runtime};
+use quinn::{Endpoint, EndpointConfig, default_runtime};
 
 use crate::{
-    identity::{ServerTlsConfig, load_server_tls},
-    obfuscated_socket::ObfuscatedSocket,
-    obfuscation::ObfuscationKey,
+    identity::ServerTlsConfig, obfuscated_socket::ObfuscatedSocket, obfuscation::ObfuscationKey,
+    tls::ServerTlsRuntime,
 };
 
 /// Создаёт QUIC endpoint PAYPHONE server.
@@ -29,11 +28,17 @@ pub fn create_server_endpoint(
     dev_mode: bool,
     tls: &ServerTlsConfig,
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
-    let (certificates, private_key) = load_server_tls(tls)?;
+    let runtime = ServerTlsRuntime::start(tls)?;
+    create_server_endpoint_with_runtime(address, obfuscation_key, dev_mode, &runtime)
+}
 
-    let mut server_config = ServerConfig::with_single_cert(certificates, private_key)?;
-
-    server_config.transport_config(crate::vpn_transport());
+pub fn create_server_endpoint_with_runtime(
+    address: SocketAddr,
+    obfuscation_key: ObfuscationKey,
+    dev_mode: bool,
+    tls: &ServerTlsRuntime,
+) -> Result<Endpoint, Box<dyn std::error::Error>> {
+    let server_config = tls.quinn_server_config()?;
 
     //
     // Сами биндим UDP socket и оборачиваем его в ObfuscatedSocket,

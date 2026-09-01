@@ -9,6 +9,11 @@
 # Env vars (PAYPHONE_BIND_ADDR, PAYPHONE_OBFS_PSK, PAYPHONE_DEV_MODE,
 # PAYPHONE_TLS_CERT, PAYPHONE_TLS_KEY, PAYPHONE_TLS_SAN) are injected
 # by Coolify's own application environment settings, not hardcoded here.
+# Leave PAYPHONE_REALITY unset/off until dest + X25519 keys + shortId
+# are configured (`payphone-token reality-init`). With PAYPHONE_TLS_DOMAIN
+# set, that hostname still gets the landing page; other hellos splice.
+# Let's Encrypt: PAYPHONE_TLS_DOMAIN=your.name (A-record to this host).
+# ACME cache is /app/state/acme on the state volume.
 #
 # Host port defaults to 443 (same port real HTTP/3 and HTTPS use)
 # rather than a random high port, per the anti-fingerprinting plan:
@@ -40,6 +45,7 @@ services:
       - payphone-state:/app/state
     environment:
       PAYPHONE_SESSION_STORE: /app/state/sessions.bin
+      PAYPHONE_REVOKE_FILE: /app/state/revoked-token-ids.txt
     restart: unless-stopped
 
 volumes:

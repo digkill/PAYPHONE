@@ -1,7 +1,4 @@
-use std::{
-    cell::Cell,
-    io,
-};
+use std::{cell::Cell, io};
 
 use rand_core::{OsRng, TryRngCore};
 

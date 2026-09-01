@@ -3,11 +3,15 @@ pub mod https_front;
 pub mod identity;
 pub mod obfuscated_socket;
 pub mod obfuscation;
+pub mod reality;
 pub mod server;
+pub mod tls;
 
 use std::{sync::Arc, time::Duration};
 
-use quinn::{AckFrequencyConfig, MtuDiscoveryConfig, TransportConfig, VarInt, congestion::BbrConfig};
+use quinn::{
+    AckFrequencyConfig, MtuDiscoveryConfig, TransportConfig, VarInt, congestion::BbrConfig,
+};
 
 /// QUIC transport for a long-lived VPN, not a short web request.
 ///
@@ -183,9 +187,8 @@ mod tests {
 
         let key = ObfuscationKey::from_passphrase("test-obfuscation-passphrase");
 
-        let endpoint =
-            create_server_endpoint(address, key, true, &ServerTlsConfig::default())
-                .expect("endpoint creation failed");
+        let endpoint = create_server_endpoint(address, key, true, &ServerTlsConfig::default())
+            .expect("endpoint creation failed");
 
         let local_address = endpoint
             .local_addr()
@@ -231,14 +234,9 @@ mod tests {
             incoming.await.expect("server-side handshake failed")
         });
 
-        let client_endpoint = create_client_endpoint(
-            key,
-            true,
-            None,
-            None,
-            &ClientTlsConfig::default(),
-        )
-        .expect("client endpoint creation failed");
+        let client_endpoint =
+            create_client_endpoint(key, true, None, None, &ClientTlsConfig::default())
+                .expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)
@@ -283,14 +281,9 @@ mod tests {
         // деобфусцируется валидным passphrase.
         let server_task = tokio::spawn(async move { server_endpoint.accept().await });
 
-        let client_endpoint = create_client_endpoint(
-            client_key,
-            true,
-            None,
-            None,
-            &ClientTlsConfig::default(),
-        )
-        .expect("client endpoint creation failed");
+        let client_endpoint =
+            create_client_endpoint(client_key, true, None, None, &ClientTlsConfig::default())
+                .expect("client endpoint creation failed");
 
         let client_result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -344,14 +337,9 @@ mod tests {
             incoming.await.expect("server-side handshake failed")
         });
 
-        let client_endpoint = create_client_endpoint(
-            key,
-            true,
-            None,
-            None,
-            &ClientTlsConfig::default(),
-        )
-        .expect("client endpoint creation failed");
+        let client_endpoint =
+            create_client_endpoint(key, true, None, None, &ClientTlsConfig::default())
+                .expect("client endpoint creation failed");
 
         let client_connection = client_endpoint
             .connect(server_address, SERVER_NAME)

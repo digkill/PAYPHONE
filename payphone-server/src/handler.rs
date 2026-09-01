@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use tokio::sync::RwLock;
 
-use payphone_auth::{AuthError, MemoryRevocationStore, SubscriptionToken, SubscriptionVerifier};
+use payphone_auth::{AuthError, FileRevocationStore, SubscriptionToken, SubscriptionVerifier};
 
 use payphone_core::{
     Frame, FrameType, PROTOCOL_VERSION,
@@ -24,11 +24,11 @@ use payphone_core::{
 
 use payphone_tun::{PAYPHONE_MTU, SharedTun, ipv4_source};
 
-use crate::session::{ClientLink, CreateSessionError, SessionManager};
+use crate::session::{ClientLink, CreateSessionError, SessionManager, accept_sequence};
 
 const SERVER_CAPABILITIES: u32 = CAP_IPV4 | CAP_DNS | CAP_RESUME;
 
-pub type PayphoneVerifier = SubscriptionVerifier<MemoryRevocationStore>;
+pub type PayphoneVerifier = SubscriptionVerifier<FileRevocationStore>;
 
 pub async fn handle_frame(
     link: ClientLink,
@@ -285,6 +285,8 @@ async fn handle_data(
 
     frame: Frame,
 ) {
+    let sequence = frame.sequence;
+
     let data = match Data::decode(frame.payload) {
         Ok(data) => data,
 
@@ -307,6 +309,10 @@ async fn handle_data(
         }
 
         if unix_time() >= session.subscription_expires_at {
+            return;
+        }
+
+        if !accept_sequence(&session.last_sequence, sequence) {
             return;
         }
 
@@ -382,15 +388,7 @@ async fn handle_ping(
     }
 }
 
-async fn send_access_denied(
-    link: &ClientLink,
-
-    sequence: u64,
-
-    reason: DenyReason,
-
-    expires_at: u64,
-) {
+async fn send_access_denied(link: &ClientLink, sequence: u64, reason: DenyReason, expires_at: u64) {
     let denied = AccessDeniedDude::new(reason, expires_at);
 
     let frame = Frame {
@@ -481,7 +479,10 @@ async fn handle_close(
 
     send_close(&link, close.session_id, close.reason).await;
 
-    println!("Session {:02x?} closed ({:?})", close.session_id, close.reason);
+    println!(
+        "Session {:02x?} closed ({:?})",
+        close.session_id, close.reason
+    );
 }
 
 async fn send_close(link: &ClientLink, session_id: [u8; 16], reason: CloseReason) {

@@ -25,6 +25,16 @@ pub const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const REKEY_AFTER: Duration = Duration::from_secs(3600);
 
+/// Drop frames this far behind the highest sequence seen.
+/// Datagrams reorder; `seq <= last` would kill honest DATA.
+pub const SEQUENCE_REORDER_WINDOW: u64 = 1024;
+
+pub fn accept_sequence(last: &AtomicU64, incoming: u64) -> bool {
+    let seen = last.fetch_max(incoming, Ordering::Relaxed);
+
+    incoming >= seen || seen - incoming < SEQUENCE_REORDER_WINDOW
+}
+
 const STORE_MAGIC: &[u8; 4] = b"PAYS";
 
 const STORE_VERSION: u8 = 1;
@@ -37,11 +47,7 @@ const UNLIMITED_DEVICES: u8 = 255;
 pub enum ClientLink {
     Quic(Connection),
 
-    Stream {
-        id: u64,
-
-        tx: mpsc::Sender<Bytes>,
-    },
+    Stream { id: u64, tx: mpsc::Sender<Bytes> },
 
     Detached,
 }
@@ -200,7 +206,7 @@ pub struct Session {
 
     pub capabilities: u32,
 
-    pub last_sequence: u64,
+    pub last_sequence: AtomicU64,
 
     #[allow(dead_code)]
     pub created_at: Instant,
@@ -276,10 +282,7 @@ impl SessionManager {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::new(),
 
             Err(error) => {
-                eprintln!(
-                    "PAYPHONE sessions: cannot read {}: {error}",
-                    path.display()
-                );
+                eprintln!("PAYPHONE sessions: cannot read {}: {error}", path.display());
 
                 Self::new()
             }
@@ -290,10 +293,7 @@ impl SessionManager {
         manager.store_path = Some(path.clone());
 
         if loaded > 0 {
-            println!(
-                "PAYPHONE sessions: loaded {loaded} from {}",
-                path.display()
-            );
+            println!("PAYPHONE sessions: loaded {loaded} from {}", path.display());
         }
 
         manager
@@ -311,7 +311,9 @@ impl SessionManager {
     ) -> Result<(AllGoodDude, Vec<KickedSession>), CreateSessionError> {
         let kicked = self.enforce_device_limit(subscription);
 
-        let assigned_ipv4 = self.allocate_ipv4().ok_or(CreateSessionError::NoAddresses)?;
+        let assigned_ipv4 = self
+            .allocate_ipv4()
+            .ok_or(CreateSessionError::NoAddresses)?;
 
         let response = AllGoodDude::new(assigned_ipv4, mtu, capabilities);
 
@@ -323,7 +325,7 @@ impl SessionManager {
             client_address,
             link,
             capabilities,
-            last_sequence,
+            last_sequence: AtomicU64::new(last_sequence),
             created_at: now,
             last_activity: now,
             last_rekey: now,
@@ -384,7 +386,7 @@ impl SessionManager {
 
         session.link = new_link;
 
-        session.last_sequence = sequence;
+        session.last_sequence.store(sequence, Ordering::Relaxed);
 
         session.last_activity = Instant::now();
 
@@ -471,9 +473,11 @@ impl SessionManager {
                 return None;
             }
 
-            session.last_activity = Instant::now();
+            if !accept_sequence(&session.last_sequence, sequence) {
+                return None;
+            }
 
-            session.last_sequence = sequence;
+            session.last_activity = Instant::now();
 
             if session.pending_nonce.is_some() {
                 (session.pending_nonce, false)
@@ -669,7 +673,7 @@ impl SessionManager {
 
             buffer.put_u32(session.capabilities);
 
-            buffer.put_u64(session.last_sequence);
+            buffer.put_u64(session.last_sequence.load(Ordering::Relaxed));
 
             buffer.extend_from_slice(&session.client_nonce);
 
@@ -777,7 +781,7 @@ impl SessionManager {
                     client_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                     link: ClientLink::Detached,
                     capabilities,
-                    last_sequence,
+                    last_sequence: AtomicU64::new(last_sequence),
                     created_at: now,
                     last_activity: now,
                     last_rekey: now,
@@ -1055,5 +1059,17 @@ mod tests {
         let limit = RateLimit::new(0);
 
         assert!(limit.allow(1_000_000_000));
+    }
+
+    #[test]
+    fn accept_sequence_allows_reorder_but_drops_old_replays() {
+        let last = AtomicU64::new(0);
+
+        assert!(accept_sequence(&last, 2000));
+        assert_eq!(last.load(Ordering::Relaxed), 2000);
+        assert!(accept_sequence(&last, 1990));
+        assert_eq!(last.load(Ordering::Relaxed), 2000);
+        assert!(accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW + 1));
+        assert!(!accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW));
     }
 }

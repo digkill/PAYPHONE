@@ -5,7 +5,7 @@
 PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from a TUN interface inside QUIC datagrams, protects the transport with TLS 1.3, and authenticates new sessions with Ed25519-signed subscription tokens.
 
 > [!WARNING]
-> PAYPHONE is a development prototype, not a production-ready VPN. Self-signed TLS is still the default; point `--tls-cert` / `--tls-ca system` at a public certificate when you have a real name.
+> PAYPHONE is a development prototype, not a production-ready VPN. Self-signed TLS is the default. Set `PAYPHONE_TLS_DOMAIN=vpn.example.com` (DNS A-record to the VPS) and the server will get a Let's Encrypt certificate on TCP 443 via TLS-ALPN-01; the client then uses that hostname and public CAs (`--tls-ca system` is automatic).
 
 ## What works
 
@@ -16,16 +16,18 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - Server-side checks for signatures, activation time, expiry, signing key, and revocation
 - Capability negotiation during the initial handshake
 - CLI flags, `.env`, and optional `payphone.toml` for addresses, PSK, TLS, and token paths
-- TLS: pin a self-signed leaf, or load PEM and trust public CAs (`--tls-ca system`)
+- TLS: pin a self-signed leaf, load PEM (`--tls-cert` / `--tls-key`, reload on mtime), or Let's Encrypt (`--tls-domain` / `PAYPHONE_TLS_DOMAIN`, TLS-ALPN-01). A public SNI makes the client trust WebPKI without a pin file.
 - Encrypted client resume file (`.payphone-session`)
 - Logical sessions with addresses from `10.77.0.0/24`
 - Session resumption after a QUIC reconnect or a server restart (sessions are stored on disk)
 - Device and bandwidth limits from the subscription token
 - `Close` on shutdown (frees the VPN address immediately) and `Rekey` (rotates the resume token)
 - Periodic `PING`/`PONG` keepalives
+- Optional client kill switch (`--kill-switch` / `PAYPHONE_KILL_SWITCH`): no Internet unless the VPN is up; default off. Ctrl+C restores the LAN.
 - Source-address validation for packets received from clients
 - Concurrent client handling with Tokio
-- Full-tunnel routing: the server enables IPv4 forwarding + NAT for the tunnel subnet, and the client overrides its default route through the TUN interface (macOS and Linux), so connected clients get real internet access, not just reachability to the server
+- Full-tunnel routing: the server enables IPv4 forwarding + NAT for the tunnel subnet, and the client overrides its default route through the TUN interface (macOS, Linux, Windows) with IPv6 blackholed so AAAA cannot leak past the tunnel
+- Token revocations on disk (`PAYPHONE_REVOKE_FILE`, `payphone-token revoke`)
 
 ## Workspace
 
@@ -34,7 +36,7 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 | `payphone-core` | Wire frames, protocol messages, codecs, constants, and validation |
 | `payphone-auth` | Subscription claims, Ed25519 signatures, key rings, and token verification |
 | `payphone-token` | CLI for generating signing keys and issuing subscription tokens |
-| `payphone-transport` | QUIC endpoints and development TLS identity management |
+| `payphone-transport` | QUIC endpoints, TLS (pin / PEM / Let's Encrypt), REALITY |
 | `payphone-tun` | Async TUN creation and IPv4 header helpers |
 | `payphone-server` | Authentication, session management, TUN routing, and QUIC server |
 | `payphone-client` | Authenticated VPN client, TUN forwarding, keepalive, and resume logic |
@@ -42,7 +44,7 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 ## Requirements
 
 - Rust 1.85 or newer (Rust 2024 edition)
-- macOS or Linux with TUN support
+- macOS, Linux, or Windows with TUN support (Windows: `wintun.dll` next to the client, run as Administrator)
 - Permission to create and configure TUN interfaces
 - Local UDP port `40404` available
 
@@ -133,6 +135,14 @@ Because the default self-signed certificate lives on the `payphone-certs` volume
 echo <hex from server logs> | xxd -r -p > dev-certs/payphone-cert.der
 ```
 
+If the VPS already has a DNS name, skip the pin. Set `PAYPHONE_TLS_DOMAIN=vpn.example.com` (and optionally `PAYPHONE_ACME_EMAIL`) on the server. Let's Encrypt talks TLS-ALPN-01 on the same TCP 443 as the landing page. The client:
+
+```bash
+sudo ./target/debug/payphone-client --server vpn.example.com:443
+```
+
+SNI becomes `vpn.example.com` and `--tls-ca system` is implied. Staging: `PAYPHONE_ACME_STAGING=true` (browsers and the client will not trust it unless you also pin). Mounted certbot PEMs still work via `PAYPHONE_TLS_CERT` / `PAYPHONE_TLS_KEY` and reload when the files change.
+
 Set `PAYPHONE_DEV_MODE=true` on both sides to log every raw UDP datagram (size + sender) before obfuscation is attempted — useful when diagnosing whether packets are reaching the server at all versus being rejected after arrival. Leave it `false` (the default) otherwise: staying silent toward unrecognized traffic is part of the defense against DPI active-probing (see [Wire obfuscation](#wire-obfuscation)).
 
 ## Subscription token tool
@@ -154,6 +164,15 @@ Generate missing keys and issue a token in one command:
 ```bash
 cargo run -p payphone-token -- setup <days> <plan>
 ```
+
+Revoke a token (append its `token_id` to `auth-keys/revoked-token-ids.txt`; the server re-reads the file on each auth, no restart):
+
+```bash
+cargo run -p payphone-token -- revoke subscription.token
+# or a 32-char hex token_id
+```
+
+Point the server at the same file with `--revoke-file` / `PAYPHONE_REVOKE_FILE` (default `auth-keys/revoked-token-ids.txt`).
 
 Available plans currently encode these claims:
 
@@ -229,8 +248,7 @@ classify the flow as "probably a VPN tunnel":
 
 Getting past this class of detection reliably needs a different transport
 model — tunneling inside TLS on port 443 that looks like a real website
-to scanners, then (later) mimicking a popular site's handshake the way
-REALITY/Xray-style tools do.
+to scanners. PAYPHONE can do that with optional REALITY (below).
 
 PAYPHONE already speaks **two** transports on the same host:
 
@@ -241,7 +259,60 @@ PAYPHONE already speaks **two** transports on the same host:
   TLS stream after the handshake.
 
 That is camouflage for "is anything listening on 443?", not a clone of
-Cloudflare's certificate/JA3. The TCP path does not use UDP obfuscation.
+Cloudflare's certificate/JA3.
+
+Optional **REALITY** on TCP 443 (`PAYPHONE_REALITY=on`, default **off**):
+
+- **B (outer):** Xray-compatible ClientHello `session_id` auth (X25519 +
+  HKDF-SHA256 `"REALITY"` + AES-256-GCM). A probe that fails that check is
+  TCP-spliced to `PAYPHONE_REALITY_DEST` (a real TLS 1.3 site reachable
+  from the VPS).
+- **A (inner):** a ClientHello that authenticates gets an ephemeral Ed25519
+  certificate signed with HMAC-SHA512(AuthKey, pubkey) — Xray's
+  `VerifyPeerCertificate` check. Then PAYPHONE frames, not VLESS.
+  An Xray/v2ray client can pass the outer handshake only if keys match; it
+  still will not get a VPN (wrong inner protocol).
+- **ClientHello:** Chrome 131-shaped (GREASE, shuffled extensions, ALPN `h2`
+  + `http/1.1`, GREASE ECH, X25519MLKEM768 + X25519). The hybrid share carries
+  a real FIPS 203 ML-KEM-768 public key; the VPN still completes with X25519.
+  The TLS stack is custom so CertificateVerify can still be Ed25519 HMAC even
+  though Chrome does not advertise `ed25519` in `signature_algorithms`.
+- **ServerHello (JA3S):** after auth the server dials dest with the same
+  ClientHello, copies dest's ServerHello, and overwrites only the X25519
+  `key_share` (Xray's rewrite). Cipher and extension order stay dest's, so
+  JA3S matches. AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305 are all
+  spoken. If dest is down, PAYPHONE falls back to its own ServerHello.
+- **Encrypted tail:** dest record sizes after ServerHello are copied the way
+  Xray does. If dest puts EncryptedExtensions+Certificate+… in one TLS record
+  larger than 512 bytes (Chrome/Google), PAYPHONE pads that one record. If dest
+  splits the flight (small EE, then Cert, … — `www.microsoft.com`), each of
+  EE / Cert / CertificateVerify / Finished is its own padded record. Dummy
+  NewSessionTicket-sized records follow Finished when dest sent extras in the
+  first flight. After ClientFinished, PAYPHONE also emits dest's **post-handshake**
+  `0x17` sizes (second ticket, etc.) learned from three background dest probes
+  (ALPN none / `http/1.1` / `h2`, Xray `GlobalPostHandshakeRecordsLens`). The
+  authenticated ClientHello picks the matching bucket.
+- **EncryptedExtensions content** is inside TLS 1.3 AEAD, so dest plaintext is
+  not visible on the wire. PAYPHONE echoes the client's ALPN (`h2` if offered).
+  Record *sizes* still follow dest.
+- **Not VLESS/Vision.** Inner frames stay PAYPHONE. Matching Xray REALITY keys
+  only gets you past the outer handshake.
+
+TLS 1.3 encrypts the certificate, so probes never see the HMAC leaf. The REALITY client
+verifies HMAC and does not need `--tls-pin`. Send dest's hostname as SNI
+(`--reality-sni`). QUIC/UDP is unchanged; REALITY is `PAYPHONE_TRANSPORT=tls`
+only.
+
+```bash
+cargo run -p payphone-token -- reality-init
+# server: PAYPHONE_REALITY=on PAYPHONE_REALITY_DEST=www.microsoft.com:443
+#         PAYPHONE_REALITY_PRIVATE_KEY=... PAYPHONE_REALITY_SHORT_ID=...
+# client: --transport tls --reality-pubkey ... --reality-short-id ... --reality-sni www.microsoft.com
+```
+
+Do not enable REALITY in Coolify until dest + keys are set. `payphone-token reality-init` writes `auth-keys/reality-private.key`, `reality-public.key`, and `reality-short-id.txt`. Then `PAYPHONE_REALITY=on` plus `PAYPHONE_REALITY_DEST`. If `PAYPHONE_TLS_DOMAIN` is also set, a browser that hits **that name** still gets your landing page (and ACME still works). Other ClientHellos splice to dest — so 443 does not lose the site for your own hostname.
+
+The TCP path does not use UDP obfuscation.
 
 ## Protocol overview
 
@@ -306,10 +377,11 @@ cargo fmt --all -- --check
 
 - Only IPv4 packets are routed; IPv6 and roaming are advertised by the client but not negotiated by the server.
 - The server runs a UDP DNS stub on `10.77.0.1:53` and the client pins that address, so DNS fails closed if the tunnel drops instead of leaking to the ISP. Browser DoH still bypasses the stub but rides the tunnel.
-- Full-tunnel routing (`payphone_tun::routing`) is only implemented for macOS and Linux; other platforms only reach 10.77.0.0/24.
-- Token revocations are stored only in memory.
-- Session sequence numbers are recorded but not currently enforced as an anti-replay mechanism.
+- Full-tunnel routing (`payphone_tun::routing`) is implemented for macOS, Linux, and Windows. Windows needs `wintun.dll` and an elevated process. IPv6 is blackholed on all three (`::/1` + `8000::/1`) so browsers fall back to IPv4 in the tunnel; there is still no in-tunnel IPv6. `--kill-switch` (default off) blackholes IPv4 too while the client is running if the tunnel is down. On-link LAN (printers, `192.168.x`) is not blocked. Windows also installs a catch-all NRPT rule so DNS is not still answered by the LAN resolver.
+- Token revocations live in `PAYPHONE_REVOKE_FILE` (hex `token_id` per line). That is not a distributed store.
+- Session sequence numbers reject frames more than 1024 behind the highest seen (reorder window). Exact duplicates inside that window still pass; QUIC/TLS already bind the datagram.
+- REALITY (optional, TCP only) splices probes to dest and authenticates PAYPHONE clients with Xray's session_id scheme plus an HMAC-SHA512 Ed25519 leaf. ClientHello follows uTLS `HelloChrome_131` (GREASE pinned first/last, shuffled middle, GREASE ECH, real ML-KEM-768 + X25519) — not bit-identical to a live Chrome capture, and Chrome itself drifts every month. Authenticated ServerHello copies dest's JA3S and patches only the X25519 key_share. Dest encrypted handshake and post-handshake record sizes are padded (three ALPN probe classes). Inner protocol is PAYPHONE, not VLESS.
 
 ## Security notice
 
-The default TLS identity is still self-signed with SNI `localhost`; the client pins `dev-certs/payphone-cert.der`. For a public name, load a Let's Encrypt PEM with `--tls-cert` / `--tls-key` on the server and `--sni your.domain --tls-ca system` on the client. The resume file is encrypted with a key derived from `PAYPHONE_OBFS_PSK`. Keep `auth-keys/subscription-private.key` secret.
+The default TLS identity is still self-signed with SNI `localhost`; the client pins `dev-certs/payphone-cert.der`. For a public name, set `PAYPHONE_TLS_DOMAIN` on the server (Let's Encrypt) or load PEM with `--tls-cert` / `--tls-key`. The client trusts public CAs when SNI looks like a real DNS name. The resume file is encrypted with a key derived from `PAYPHONE_OBFS_PSK`. Keep `auth-keys/subscription-private.key` secret.

@@ -8,18 +8,23 @@ use std::{
 
 use bytes::Bytes;
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{RwLock, mpsc},
 };
+use tokio_rustls::TlsAcceptor;
 
 use payphone_core::HEADER_SIZE;
 use payphone_transport::{
     https_front::{
         finish_payphone_frame, looks_like_http, read_payphone_frame, serve_camouflage_http,
-        tls_server_acceptor, write_payphone_bytes,
+        write_payphone_bytes,
     },
-    identity::ServerTlsConfig,
+    reality::{
+        ClientHelloView, PrefixedStream, RealityAccept, RealityServerConfig, Tls13Stream,
+        accept as reality_accept, read_tls_record,
+    },
+    tls::ServerTlsRuntime,
 };
 use payphone_tun::SharedTun;
 
@@ -34,30 +39,46 @@ pub async fn run(
     verifier: Arc<PayphoneVerifier>,
     tun: SharedTun,
     stream_ids: Arc<AtomicU64>,
-    tls: ServerTlsConfig,
+    tls: ServerTlsRuntime,
+    reality: Option<RealityServerConfig>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let acceptor = tls_server_acceptor(&tls).map_err(|error| error.to_string())?;
-
     let listener = TcpListener::bind(bind).await?;
 
-    println!("PAYPHONE HTTPS front: {bind} (site for browsers, tunnel for clients)");
+    if let Some(reality) = &reality {
+        reality.spawn_post_handshake_probe();
+        let local = if reality.local_names.is_empty() {
+            "probes splice (no local name)".to_string()
+        } else {
+            format!("local {} keep landing", reality.local_names.join(","))
+        };
+        println!(
+            "PAYPHONE HTTPS front: {bind} (REALITY dest {}, {local})",
+            reality.dest
+        );
+    } else if tls.tls.acme_enabled() {
+        println!(
+            "PAYPHONE HTTPS front: {bind} (Let's Encrypt {}, landing + tunnel)",
+            tls.tls.acme_domain.as_deref().unwrap_or("?")
+        );
+    } else {
+        println!("PAYPHONE HTTPS front: {bind} (site for browsers, tunnel for clients)");
+    }
 
     loop {
         let (tcp, peer) = listener.accept().await?;
 
         let _ = tcp.set_nodelay(true);
 
-        let acceptor = acceptor.clone();
+        let tls = tls.clone();
         let sessions = Arc::clone(&sessions);
         let verifier = Arc::clone(&verifier);
         let tun = Arc::clone(&tun);
         let stream_ids = Arc::clone(&stream_ids);
+        let reality = reality.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(
-                tcp, peer, acceptor, sessions, verifier, tun, stream_ids,
-            )
-            .await
+            if let Err(error) =
+                serve_connection(tcp, peer, tls, sessions, verifier, tun, stream_ids, reality).await
             {
                 eprintln!("PAYPHONE HTTPS front {peer}: {error}");
             }
@@ -68,14 +89,86 @@ pub async fn run(
 async fn serve_connection(
     tcp: tokio::net::TcpStream,
     peer: SocketAddr,
-    acceptor: tokio_rustls::TlsAcceptor,
+    tls: ServerTlsRuntime,
+    sessions: Arc<RwLock<SessionManager>>,
+    verifier: Arc<PayphoneVerifier>,
+    tun: SharedTun,
+    stream_ids: Arc<AtomicU64>,
+    reality: Option<RealityServerConfig>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(reality) = &reality {
+        match reality_accept(tcp, reality).await? {
+            RealityAccept::Vpn {
+                stream,
+                auth_key,
+                server_name,
+                dest_flight,
+            } => {
+                let tls =
+                    Tls13Stream::accept(stream, &auth_key, &server_name, dest_flight.as_ref())
+                        .await?;
+                serve_tls_session(tls, peer, sessions, verifier, tun, stream_ids).await
+            }
+            RealityAccept::Local { stream, acme } => {
+                accept_local(
+                    stream, acme, &tls, peer, sessions, verifier, tun, stream_ids,
+                )
+                .await
+            }
+            RealityAccept::Spliced => Ok(()),
+        }
+    } else if tls.acme_challenge.is_some() {
+        let mut tcp = tcp;
+        let record = read_tls_record(&mut tcp).await?;
+        let acme = ClientHelloView::parse(&record).is_some_and(|view| view.has_acme_alpn());
+        let stream = PrefixedStream::new(record, tcp);
+        accept_local(
+            stream, acme, &tls, peer, sessions, verifier, tun, stream_ids,
+        )
+        .await
+    } else {
+        let stream = tls.acceptor.accept(tcp).await?;
+        serve_tls_session(stream, peer, sessions, verifier, tun, stream_ids).await
+    }
+}
+
+async fn accept_local(
+    stream: PrefixedStream,
+    acme: bool,
+    tls: &ServerTlsRuntime,
+    peer: SocketAddr,
     sessions: Arc<RwLock<SessionManager>>,
     verifier: Arc<PayphoneVerifier>,
     tun: SharedTun,
     stream_ids: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut stream = acceptor.accept(tcp).await?;
+    let acceptor: &TlsAcceptor = if acme {
+        tls.acme_challenge.as_ref().unwrap_or(&tls.acceptor)
+    } else {
+        &tls.acceptor
+    };
 
+    let mut accepted = acceptor.accept(stream).await?;
+
+    if acme {
+        let _ = accepted.shutdown().await;
+        return Ok(());
+    }
+
+    serve_tls_session(accepted, peer, sessions, verifier, tun, stream_ids).await
+}
+
+async fn serve_tls_session<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    sessions: Arc<RwLock<SessionManager>>,
+    verifier: Arc<PayphoneVerifier>,
+    tun: SharedTun,
+    stream_ids: Arc<AtomicU64>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut header = [0u8; HEADER_SIZE];
 
     stream.read_exact(&mut header).await?;
@@ -102,10 +195,7 @@ async fn serve_connection(
         }
     });
 
-    let link = ClientLink::Stream {
-        id: stream_id,
-        tx,
-    };
+    let link = ClientLink::Stream { id: stream_id, tx };
 
     handle_frame(
         link.clone(),

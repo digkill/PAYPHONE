@@ -461,11 +461,8 @@ impl Frame {
             return Err(FrameError::UnsupportedVersion(header[0]));
         }
 
-        let payload_len = u32::from_be_bytes(
-            header[4..8]
-                .try_into()
-                .expect("slice is 4 bytes"),
-        ) as usize;
+        let payload_len =
+            u32::from_be_bytes(header[4..8].try_into().expect("slice is 4 bytes")) as usize;
 
         if payload_len > MAX_PAYLOAD_SIZE {
             return Err(FrameError::PayloadTooLarge);

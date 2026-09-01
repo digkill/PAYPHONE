@@ -143,16 +143,12 @@ impl HandshakeIo for TlsClientSession {
 fn resolve_server_addr(setting: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     setting
         .to_socket_addrs()
-        .map_err(|error| {
-            format!("cannot resolve PAYPHONE_SERVER_ADDR {setting}: {error}")
-        })?
+        .map_err(|error| format!("cannot resolve PAYPHONE_SERVER_ADDR {setting}: {error}"))?
         .next()
         .ok_or_else(|| format!("PAYPHONE_SERVER_ADDR {setting} resolved to no address").into())
 }
 
-fn tls_connect_address(
-    quic_address: SocketAddr,
-) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+fn tls_connect_address(quic_address: SocketAddr) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     if let Some(setting) = runtime().tcp_server.as_deref() {
         return resolve_server_addr(setting);
     }
@@ -324,10 +320,7 @@ async fn establish_session<I: HandshakeIo>(
     }
 }
 
-async fn rotate_resume_token<I: HandshakeIo>(
-    io: &mut I,
-    session_id: [u8; SESSION_ID_SIZE],
-) {
+async fn rotate_resume_token<I: HandshakeIo>(io: &mut I, session_id: [u8; SESSION_ID_SIZE]) {
     let request = Frame {
         version: PROTOCOL_VERSION,
         frame_type: FrameType::Rekey,
@@ -430,7 +423,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     matrix::banner();
 
-    if settings.tls.use_webpki {
+    if settings.tls.reality.is_some() {
+        matrix::status(&format!(
+            "REALITY SNI {} (HMAC cert, Chrome ClientHello)",
+            settings.tls.server_name
+        ));
+    } else if settings.tls.use_webpki {
         matrix::status(&format!("TLS SNI {} (public CA)", settings.tls.server_name));
     } else {
         matrix::status(&format!(
@@ -456,9 +454,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TransportKind::Tls => None,
     };
 
+    // After capturing the LAN source address: blackholes would hide it.
+    let _kill_switch = if settings.kill_switch {
+        matrix::status("Kill switch on: no Internet unless PAYPHONE is up");
+        Some(payphone_tun::routing::KillSwitchGuard::install(
+            server_address,
+        )?)
+    } else {
+        None
+    };
+
     let mut connected_once = false;
 
     loop {
+        if let Some(ref guard) = _kill_switch {
+            guard.ensure();
+        }
+
         let session = match settings.transport {
             TransportKind::Quic => {
                 let endpoint = quic_endpoint.as_ref().expect("QUIC endpoint");
@@ -495,7 +507,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         matrix::status(&format!("Capabilities: {}", active.capabilities));
 
-        match run_tunnel(active, tunnel_host, sink, incoming, quic).await? {
+        match run_tunnel(
+            active,
+            tunnel_host,
+            sink,
+            incoming,
+            quic,
+            settings.kill_switch,
+        )
+        .await?
+        {
             TunnelExit::Stopped => return Ok(()),
 
             TunnelExit::Denied(reason) => return Err(reason.into()),

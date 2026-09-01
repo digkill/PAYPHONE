@@ -10,6 +10,7 @@ use rand_core::{OsRng, TryRngCore};
 
 use payphone_auth::{
     CLIENT_ID_SIZE, SubscriptionClaims, SubscriptionPlan, SubscriptionToken, TOKEN_ID_SIZE,
+    append_revoked_id, parse_token_id_hex, token_id_hex,
 };
 
 // =============================================================
@@ -43,6 +44,8 @@ const PUBLIC_KEY_PATH: &str = "auth-keys/subscription-public.key";
 // Этот файл передаётся клиенту.
 //
 const TOKEN_PATH: &str = "subscription.token";
+
+const REVOKED_PATH: &str = "auth-keys/revoked-token-ids.txt";
 
 //
 // ID текущего signing key.
@@ -125,33 +128,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // payphone-token setup 30 pro
         //
         "setup" => {
-            if args.len() != 4 {
-                println!("Usage:");
-
-                println!("  payphone-token setup <days> <plan>");
-
-                return Ok(());
-            }
-
-            let days: u64 = args[2]
-                .parse()
-                .map_err(|_| "days must be a positive integer")?;
-
-            if days == 0 {
-                return Err("days must be greater than zero".into());
-            }
-
-            let plan = parse_plan(&args[3])?;
-
-            //
-            // Если ключей нет —
-            // создаём.
-            //
-            if !Path::new(PRIVATE_KEY_PATH).exists() || !Path::new(PUBLIC_KEY_PATH).exists() {
+            if !Path::new(PRIVATE_KEY_PATH).exists() {
                 init_keys()?;
             }
 
+            if args.len() != 4 {
+                println!("Usage:");
+                println!("  payphone-token setup <days> <plan>");
+                return Ok(());
+            }
+
+            let days: u64 = args[2].parse()?;
+            let plan = parse_plan(&args[3])?;
             issue_token(days, plan)?;
+        }
+
+        "reality-init" => {
+            init_reality_keys()?;
+        }
+
+        "revoke" => {
+            if args.len() != 3 {
+                println!("Usage:");
+                println!("  payphone-token revoke <token-file|token-id-hex>");
+                return Ok(());
+            }
+
+            revoke_token(&args[2])?;
         }
 
         _ => {
@@ -186,6 +189,18 @@ fn print_usage() {
     println!("Generate keys if needed and issue token:");
 
     println!("  cargo run -p payphone-token -- setup 30 pro");
+
+    println!();
+
+    println!("Generate REALITY X25519 keys:");
+
+    println!("  cargo run -p payphone-token -- reality-init");
+
+    println!();
+
+    println!("Revoke a token (append token_id to auth-keys/revoked-token-ids.txt):");
+
+    println!("  cargo run -p payphone-token -- revoke subscription.token");
 
     println!();
 
@@ -293,6 +308,67 @@ fn init_keys() -> Result<(), Box<dyn std::error::Error>> {
     println!("  public key goes to PAYPHONE server");
 
     Ok(())
+}
+
+const REALITY_PRIVATE_PATH: &str = "auth-keys/reality-private.key";
+const REALITY_PUBLIC_PATH: &str = "auth-keys/reality-public.key";
+const REALITY_SHORT_ID_PATH: &str = "auth-keys/reality-short-id.txt";
+
+fn init_reality_keys() -> Result<(), Box<dyn std::error::Error>> {
+    if Path::new(REALITY_PRIVATE_PATH).exists() {
+        return Err(format!("{REALITY_PRIVATE_PATH} already exists").into());
+    }
+
+    if Path::new(REALITY_PUBLIC_PATH).exists() {
+        return Err(format!("{REALITY_PUBLIC_PATH} already exists").into());
+    }
+
+    fs::create_dir_all("auth-keys")?;
+
+    let mut seed = [0u8; 32];
+    OsRng.try_fill_bytes(&mut seed)?;
+    let secret = x25519_dalek::StaticSecret::from(seed);
+    let public = x25519_dalek::PublicKey::from(&secret);
+
+    let mut short_id = [0u8; 8];
+    OsRng.try_fill_bytes(&mut short_id)?;
+    let short_hex = hex(&short_id);
+
+    fs::write(REALITY_PRIVATE_PATH, secret.to_bytes())?;
+    fs::write(REALITY_PUBLIC_PATH, public.to_bytes())?;
+    fs::write(REALITY_SHORT_ID_PATH, format!("{short_hex}\n"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(REALITY_PRIVATE_PATH, fs::Permissions::from_mode(0o600))?;
+    }
+
+    println!("PAYPHONE REALITY X25519 keys created");
+    println!();
+    println!("PRIVATE:  {REALITY_PRIVATE_PATH}");
+    println!("PUBLIC:   {REALITY_PUBLIC_PATH}");
+    println!("SHORT ID: {REALITY_SHORT_ID_PATH} ({short_hex})");
+    println!();
+    println!("Server:");
+    println!("  PAYPHONE_REALITY=on");
+    println!("  PAYPHONE_REALITY_DEST=www.microsoft.com:443");
+    println!("  PAYPHONE_REALITY_PRIVATE_KEY={REALITY_PRIVATE_PATH}");
+    println!("  PAYPHONE_REALITY_SHORT_ID={short_hex}");
+    println!();
+    println!("If PAYPHONE_TLS_DOMAIN is set, browsers hitting that name still get");
+    println!("your landing page. Other ClientHellos splice to dest.");
+    println!();
+    println!("Client (with PAYPHONE_TRANSPORT=tls):");
+    println!("  PAYPHONE_REALITY_PUBLIC_KEY={}", hex(&public.to_bytes()));
+    println!("  PAYPHONE_REALITY_SHORT_ID={short_hex}");
+    println!("  PAYPHONE_REALITY_SNI=www.microsoft.com");
+
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 // =============================================================
@@ -486,6 +562,21 @@ fn issue_token(days: u64, plan: SubscriptionPlan) -> Result<(), Box<dyn std::err
 
     println!("  {}", TOKEN_PATH);
 
+    Ok(())
+}
+
+fn revoke_token(arg: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let token_id = if Path::new(arg).exists() {
+        let encoded = fs::read(arg)?;
+        SubscriptionToken::decode(encoded.into())?.claims.token_id
+    } else {
+        parse_token_id_hex(arg).ok_or("expected a token file or 32-char hex token_id")?
+    };
+
+    append_revoked_id(Path::new(REVOKED_PATH), token_id)?;
+    println!("Revoked {}", token_id_hex(&token_id));
+    println!("File: {REVOKED_PATH}");
+    println!("Restart is not required; the server re-reads the file on each auth.");
     Ok(())
 }
 

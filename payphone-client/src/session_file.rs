@@ -56,15 +56,17 @@ pub fn exists() -> bool {
     path().exists()
 }
 
-pub fn save(session_id: [u8; SESSION_ID_SIZE], resume_token: [u8; SERVER_NONCE_SIZE]) -> std::io::Result<()> {
+pub fn save(
+    session_id: [u8; SESSION_ID_SIZE],
+    resume_token: [u8; SERVER_NONCE_SIZE],
+) -> std::io::Result<()> {
     let mut plaintext = [0u8; PLAINTEXT_SIZE];
 
     plaintext[..SESSION_ID_SIZE].copy_from_slice(&session_id);
 
     plaintext[SESSION_ID_SIZE..].copy_from_slice(&resume_token);
 
-    let bytes = seal(&store().key, &plaintext)
-        .map_err(|error| std::io::Error::other(error))?;
+    let bytes = seal(&store().key, &plaintext).map_err(|error| std::io::Error::other(error))?;
 
     fs::write(path(), bytes)
 }

@@ -91,11 +91,7 @@ impl fmt::Debug for ObfuscatedSocket {
     }
 }
 
-fn deobfuscate_into(
-    key: &ObfuscationKey,
-    buf: &mut [u8],
-    meta: &mut RecvMeta,
-) -> bool {
+fn deobfuscate_into(key: &ObfuscationKey, buf: &mut [u8], meta: &mut RecvMeta) -> bool {
     let total = meta.len;
 
     if total == 0 {

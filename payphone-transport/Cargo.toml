@@ -35,6 +35,18 @@ tokio = { version = "1", features = [
 ] }
 
 tokio-rustls = "0.26"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+libcrux-ml-kem = { version = "0.0.10", default-features = false, features = ["mlkem768"] }
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring", "std"] }
+rustls-acme = { version = "0.15.4", default-features = false, features = [
+    "ring",
+    "tokio",
+    "tls12",
+    "webpki-roots",
+] }
+futures-util = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

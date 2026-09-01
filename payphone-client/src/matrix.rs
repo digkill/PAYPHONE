@@ -362,9 +362,7 @@ impl FlowIndicator {
 
         print!("{HIDE_CURSOR}");
 
-        print!(
-            "{BRIGHT_GREEN}▸ follow the white rabbit · 0 pkts{RESET}\x1b[K\n"
-        );
+        print!("{BRIGHT_GREEN}▸ follow the white rabbit · 0 pkts{RESET}\x1b[K\n");
 
         for _ in 0..height {
             println!();

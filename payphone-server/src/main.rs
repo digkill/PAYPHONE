@@ -13,16 +13,15 @@ use bytes::Bytes;
 
 use ed25519_dalek::VerifyingKey;
 
-use payphone_auth::{MemoryRevocationStore, SubscriptionVerifier, VerificationKeyRing};
+use payphone_auth::{FileRevocationStore, SubscriptionVerifier, VerificationKeyRing};
 
 use payphone_core::{
     DEFAULT_PORT, DEFAULT_TCP_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data,
 };
 
 use payphone_transport::{
-    identity::{load_certificates, load_server_tls},
-    obfuscation::ObfuscationKey,
-    server::create_server_endpoint,
+    identity::load_certificates, obfuscation::ObfuscationKey,
+    server::create_server_endpoint_with_runtime, tls::ServerTlsRuntime,
 };
 
 use payphone_tun::{create_server_tun, ipv4_destination};
@@ -56,9 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tls = settings.tls.clone();
 
-    load_server_tls(&tls)?;
+    let tls_runtime = ServerTlsRuntime::start(&tls)?;
 
-    let endpoint = create_server_endpoint(address, obfuscation_key, settings.dev_mode, &tls)?;
+    let endpoint = create_server_endpoint_with_runtime(
+        address,
+        obfuscation_key,
+        settings.dev_mode,
+        &tls_runtime,
+    )?;
 
     println!("PAYPHONE server: {}", address);
 
@@ -67,7 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // copy it into the client's pin file. A public-CA cert is
     // already trusted by --tls-ca system; don't spam a chain.
     //
-    if tls.uses_default_paths() {
+    if tls.acme_enabled() {
+        // ACME logs the domain and client flags in ServerTlsRuntime::start.
+    } else if tls.uses_default_paths() {
         let certificates = load_certificates(&tls.cert_path)?;
 
         print!("PAYPHONE server certificate (hex, copy to client's pin file): ");
@@ -79,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     } else {
         println!(
-            "PAYPHONE TLS: {} + {} (SAN {})",
+            "PAYPHONE TLS: {} + {} (SAN {}, reload on mtime)",
             tls.cert_path.display(),
             tls.key_path.display(),
             tls.sans.join(", ")
@@ -134,9 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions = Arc::new(RwLock::new(SessionManager::with_store(session_store)));
 
-    let public_key = fs::read(&settings.auth_key).map_err(|error| {
-        format!("cannot read {}: {error}", settings.auth_key.display())
-    })?;
+    let public_key = fs::read(&settings.auth_key)
+        .map_err(|error| format!("cannot read {}: {error}", settings.auth_key.display()))?;
 
     let public_key: [u8; 32] = public_key
         .try_into()
@@ -150,12 +155,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let verifier = Arc::new(SubscriptionVerifier::new(
         keys,
-        MemoryRevocationStore::new(),
+        FileRevocationStore::open(settings.revoke_file),
     ));
 
     //
     // TCP 443 camouflage: browsers get a landing page, PAYPHONE
     // clients speak the same frames over TLS after the handshake.
+    // With REALITY enabled, probes are spliced to dest instead.
     // Set PAYPHONE_TCP_BIND_ADDR=off to disable.
     //
     let tcp_bind = match settings.tcp_bind.as_deref() {
@@ -185,10 +191,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let verifier = Arc::clone(&verifier);
         let tun = Arc::clone(&tun);
         let stream_ids = Arc::clone(&stream_ids);
-        let tls = tls.clone();
+        let tls_runtime = tls_runtime.clone();
+        let reality = settings.reality.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = https::run(tcp_bind, sessions, verifier, tun, stream_ids, tls).await
+            if let Err(error) = https::run(
+                tcp_bind,
+                sessions,
+                verifier,
+                tun,
+                stream_ids,
+                tls_runtime,
+                reality,
+            )
+            .await
             {
                 eprintln!("PAYPHONE HTTPS front stopped: {error}");
             }
@@ -196,9 +212,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let dns_upstream = match settings.dns_upstream {
-        Some(value) => value.parse::<SocketAddr>().map_err(|error| {
-            format!("invalid DNS upstream {value}: {error}")
-        })?,
+        Some(value) => value
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("invalid DNS upstream {value}: {error}"))?,
 
         None => dns::default_upstream(),
     };

@@ -22,3 +22,5 @@ rand_core = {
         "os_rng"
     ]
 }
+
+x25519-dalek = { version = "2", features = ["static_secrets"] }

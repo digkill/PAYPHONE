@@ -43,10 +43,7 @@ pub struct Close {
 
 impl Close {
     pub fn new(session_id: [u8; SESSION_ID_SIZE], reason: CloseReason) -> Self {
-        Self {
-            session_id,
-            reason,
-        }
+        Self { session_id, reason }
     }
 
     pub fn encode(&self) -> Bytes {
@@ -70,10 +67,7 @@ impl Close {
 
         let reason = CloseReason::try_from(buffer.get_u8())?;
 
-        Ok(Self {
-            session_id,
-            reason,
-        })
+        Ok(Self { session_id, reason })
     }
 }
 

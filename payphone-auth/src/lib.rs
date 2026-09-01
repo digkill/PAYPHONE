@@ -153,4 +153,31 @@ mod tests {
 
         assert!(matches!(result, Err(AuthError::InvalidSignature)));
     }
+
+    #[test]
+    fn file_revocation_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "payphone-revoke-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+
+        let signing_key = generate_signing_key().unwrap();
+        let token = SubscriptionToken::sign(test_claims(), &signing_key);
+        append_revoked_id(&path, token.claims.token_id).unwrap();
+
+        let mut keys = VerificationKeyRing::new();
+        keys.insert(1, signing_key.verifying_key());
+        let store = FileRevocationStore::open(&path);
+        let verifier = SubscriptionVerifier::new(keys, store);
+
+        let result = verifier.verify_at(&token, 1_500);
+        assert!(matches!(result, Err(AuthError::Revoked)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

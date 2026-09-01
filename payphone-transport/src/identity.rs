@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::Cursor,
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -33,6 +34,18 @@ pub struct ServerTlsConfig {
     pub key_path: PathBuf,
 
     pub sans: Vec<String>,
+
+    /// Public DNS name. When set and cert/key are still the default
+    /// self-signed paths, the server obtains a Let's Encrypt leaf
+    /// via TLS-ALPN-01 on the HTTPS front (TCP 443).
+    pub acme_domain: Option<String>,
+
+    pub acme_email: Option<String>,
+
+    pub acme_dir: PathBuf,
+
+    /// Let's Encrypt staging (untrusted by browsers). Default off.
+    pub acme_staging: bool,
 }
 
 impl Default for ServerTlsConfig {
@@ -41,7 +54,19 @@ impl Default for ServerTlsConfig {
             cert_path: PathBuf::from(CERT_PATH),
             key_path: PathBuf::from(KEY_PATH),
             sans: vec![SERVER_NAME.to_string()],
+            acme_domain: None,
+            acme_email: None,
+            acme_dir: default_acme_dir(),
+            acme_staging: false,
         }
+    }
+}
+
+pub fn default_acme_dir() -> PathBuf {
+    if Path::new("/app/state").is_dir() {
+        PathBuf::from("/app/state/acme")
+    } else {
+        PathBuf::from("dev-certs/acme")
     }
 }
 
@@ -53,11 +78,49 @@ impl ServerTlsConfig {
             key_path: env_path("PAYPHONE_TLS_KEY", KEY_PATH),
 
             sans: parse_sans(std::env::var("PAYPHONE_TLS_SAN").ok()),
+            acme_domain: std::env::var("PAYPHONE_TLS_DOMAIN")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            acme_email: std::env::var("PAYPHONE_ACME_EMAIL")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            acme_dir: std::env::var("PAYPHONE_ACME_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| default_acme_dir()),
+            acme_staging: matches!(
+                std::env::var("PAYPHONE_ACME_STAGING")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true" | "on" | "yes"
+            ),
         }
     }
 
     pub fn uses_default_paths(&self) -> bool {
         self.cert_path == Path::new(CERT_PATH) && self.key_path == Path::new(KEY_PATH)
+    }
+
+    /// ACME on the default self-signed paths. Mounted PEM wins over ACME.
+    pub fn acme_enabled(&self) -> bool {
+        self.acme_domain
+            .as_ref()
+            .is_some_and(|name| looks_like_public_dns_name(name))
+            && self.uses_default_paths()
+    }
+
+    /// Hostnames we should terminate locally (landing / ACME / our cert)
+    /// instead of REALITY-splicing to dest.
+    pub fn local_hostnames(&self) -> Vec<String> {
+        let mut names = self.sans.clone();
+
+        if let Some(domain) = &self.acme_domain {
+            names.push(domain.clone());
+        }
+
+        names.sort();
+        names.dedup();
+        names.into_iter().filter(|name| !name.is_empty()).collect()
     }
 }
 
@@ -73,6 +136,9 @@ pub struct ClientTlsConfig {
     /// Trust the Mozilla/webpki root store instead of a pin file.
     /// Use this with a Let's Encrypt (or other public) certificate.
     pub use_webpki: bool,
+
+    /// Xray-compatible REALITY on the TCP path. `None` = ordinary rustls.
+    pub reality: Option<crate::reality::RealityClientConfig>,
 }
 
 impl Default for ClientTlsConfig {
@@ -83,6 +149,8 @@ impl Default for ClientTlsConfig {
             pin_path: PathBuf::from(CERT_PATH),
 
             use_webpki: false,
+
+            reality: None,
         }
     }
 }
@@ -115,6 +183,43 @@ impl ClientTlsConfig {
     }
 }
 
+/// Host part of `host:port` or `[v6]:port`. `None` if empty.
+pub fn hostname_from_addr(addr: &str) -> Option<String> {
+    let addr = addr.trim();
+
+    if addr.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = addr.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = rest[..end].trim();
+        return (!host.is_empty()).then(|| host.to_string());
+    }
+
+    match addr.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            Some(host.to_string())
+        }
+        _ => Some(addr.to_string()),
+    }
+}
+
+/// A name browsers and Let's Encrypt will treat as a real DNS name.
+pub fn looks_like_public_dns_name(name: &str) -> bool {
+    let name = name.trim().trim_end_matches('.');
+
+    if name.is_empty() || name.eq_ignore_ascii_case(SERVER_NAME) {
+        return false;
+    }
+
+    if name.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+
+    name.contains('.')
+}
+
 pub fn parse_sans(value: Option<String>) -> Vec<String> {
     let names: Vec<String> = value
         .unwrap_or_default()
@@ -140,7 +245,9 @@ pub fn looks_like_pem(bytes: &[u8]) -> bool {
     bytes.starts_with(b"-----BEGIN") || bytes.windows(11).any(|w| w == b"-----BEGIN")
 }
 
-pub fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Box<dyn std::error::Error>> {
+pub fn load_certificates(
+    path: &Path,
+) -> Result<Vec<CertificateDer<'static>>, Box<dyn std::error::Error>> {
     let bytes = fs::read(path)
         .map_err(|error| format!("cannot read TLS certificate {}: {error}", path.display()))?;
 
@@ -196,7 +303,17 @@ pub fn ensure_server_identity(config: &ServerTlsConfig) -> Result<(), Box<dyn st
         fs::create_dir_all(parent)?;
     }
 
-    let CertifiedKey { cert, signing_key } = generate_simple_self_signed(config.sans.clone())?;
+    let mut sans = config.sans.clone();
+
+    if let Some(domain) = &config.acme_domain {
+        if looks_like_public_dns_name(domain)
+            && !sans.iter().any(|name| name.eq_ignore_ascii_case(domain))
+        {
+            sans.push(domain.clone());
+        }
+    }
+
+    let CertifiedKey { cert, signing_key } = generate_simple_self_signed(sans.clone())?;
 
     fs::write(&config.cert_path, cert.der().as_ref())?;
 
@@ -279,5 +396,33 @@ mod tests {
             parse_sans(Some(" vpn.example.com , localhost ".into())),
             vec!["vpn.example.com", "localhost"]
         );
+    }
+
+    #[test]
+    fn hostname_from_addr_splits_port() {
+        assert_eq!(
+            hostname_from_addr("vpn.example.com:443").as_deref(),
+            Some("vpn.example.com")
+        );
+        assert_eq!(
+            hostname_from_addr("127.0.0.1:40404").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(hostname_from_addr("[::1]:443").as_deref(), Some("::1"));
+        assert_eq!(
+            hostname_from_addr("vpn.example.com").as_deref(),
+            Some("vpn.example.com")
+        );
+    }
+
+    #[test]
+    fn public_dns_name_skips_localhost_and_ips() {
+        assert!(looks_like_public_dns_name("vpn.example.com"));
+        assert!(looks_like_public_dns_name(
+            "maekedpjbsakslcdmtzc7qaw.201.51.24.102.sslip.io"
+        ));
+        assert!(!looks_like_public_dns_name("localhost"));
+        assert!(!looks_like_public_dns_name("127.0.0.1"));
+        assert!(!looks_like_public_dns_name("201.51.24.102"));
     }
 }

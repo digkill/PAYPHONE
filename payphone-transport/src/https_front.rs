@@ -7,16 +7,19 @@ use tokio::{
     net::TcpStream,
     sync::Mutex,
 };
-use tokio_rustls::{
-    TlsAcceptor, TlsConnector,
-    client::TlsStream as ClientTlsStream,
-};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use payphone_core::{Frame, HEADER_SIZE, PROTOCOL_VERSION};
 
 use crate::identity::{ClientTlsConfig, ServerTlsConfig, client_root_store, load_server_tls};
 
 pub const HTTP_ALPN: &[u8] = b"http/1.1";
+
+pub trait TlsIo: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T> TlsIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
+
+pub type TlsIoBox = Box<dyn TlsIo>;
 
 fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -115,7 +118,10 @@ where
     finish_payphone_frame(reader, header).await
 }
 
-pub async fn finish_payphone_frame<R>(reader: &mut R, header: [u8; HEADER_SIZE]) -> io::Result<Frame>
+pub async fn finish_payphone_frame<R>(
+    reader: &mut R,
+    header: [u8; HEADER_SIZE],
+) -> io::Result<Frame>
 where
     R: AsyncRead + Unpin,
 {
@@ -169,14 +175,14 @@ where
 }
 
 pub struct TlsClientSession {
-    read: ReadHalf<ClientTlsStream<TcpStream>>,
+    read: ReadHalf<TlsIoBox>,
 
-    write: Arc<Mutex<WriteHalf<ClientTlsStream<TcpStream>>>>,
+    write: Arc<Mutex<WriteHalf<TlsIoBox>>>,
 }
 
 #[derive(Clone)]
 pub struct TlsFrameWriter {
-    write: Arc<Mutex<WriteHalf<ClientTlsStream<TcpStream>>>>,
+    write: Arc<Mutex<WriteHalf<TlsIoBox>>>,
 }
 
 impl TlsClientSession {
@@ -184,15 +190,21 @@ impl TlsClientSession {
         address: std::net::SocketAddr,
         tls: &ClientTlsConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let tcp = TcpStream::connect(address).await?;
+        let stream: TlsIoBox = if let Some(reality) = &tls.reality {
+            Box::new(crate::reality::Tls13Client::connect(address, reality, tls).await?)
+        } else {
+            let tcp = TcpStream::connect(address).await?;
 
-        tcp.set_nodelay(true)?;
+            tcp.set_nodelay(true)?;
 
-        let tls = tls_client_connector(tls)?
-            .connect(tls_server_name(&tls.server_name)?, tcp)
-            .await?;
+            Box::new(
+                tls_client_connector(tls)?
+                    .connect(tls_server_name(&tls.server_name)?, tcp)
+                    .await?,
+            )
+        };
 
-        let (read, write) = split(tls);
+        let (read, write) = split(stream);
 
         Ok(Self {
             read,
@@ -210,13 +222,8 @@ impl TlsClientSession {
         read_payphone_frame(&mut self.read).await
     }
 
-    pub fn into_split(self) -> (ReadHalf<ClientTlsStream<TcpStream>>, TlsFrameWriter) {
-        (
-            self.read,
-            TlsFrameWriter {
-                write: self.write,
-            },
-        )
+    pub fn into_split(self) -> (ReadHalf<TlsIoBox>, TlsFrameWriter) {
+        (self.read, TlsFrameWriter { write: self.write })
     }
 }
 
