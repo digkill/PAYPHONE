@@ -1,7 +1,14 @@
+# Coolify runs `docker compose build --pull` on every deploy. Bare
+# `rust:` / `debian:` names hit Docker Hub, and a shared VPS IP hits
+# the anonymous 429 quickly. Public ECR is the same official images
+# without that Hub quota.
+ARG RUST_IMAGE=public.ecr.aws/docker/library/rust:slim-bookworm
+ARG DEBIAN_IMAGE=public.ecr.aws/docker/library/debian:bookworm-slim
+
 # =============================================================
 # BUILDER
 # =============================================================
-FROM rust:slim-bookworm AS builder
+FROM ${RUST_IMAGE} AS builder
 
 WORKDIR /build
 
@@ -22,7 +29,7 @@ RUN cargo build --release \
 # =============================================================
 # SERVER
 # =============================================================
-FROM debian:bookworm-slim AS server
+FROM ${DEBIAN_IMAGE} AS server
 
 # iptables: sets up NAT/MASQUERADE for the tunnel subnet so
 # clients get real internet access, not just reach the server.
@@ -48,7 +55,7 @@ ENTRYPOINT ["/usr/local/bin/payphone-server"]
 # =============================================================
 # CLIENT
 # =============================================================
-FROM debian:bookworm-slim AS client
+FROM ${DEBIAN_IMAGE} AS client
 
 WORKDIR /app
 
@@ -59,7 +66,7 @@ ENTRYPOINT ["/usr/local/bin/payphone-client"]
 # =============================================================
 # TOKEN (subscription key / token issuer helper)
 # =============================================================
-FROM debian:bookworm-slim AS token
+FROM ${DEBIAN_IMAGE} AS token
 
 WORKDIR /app
 
