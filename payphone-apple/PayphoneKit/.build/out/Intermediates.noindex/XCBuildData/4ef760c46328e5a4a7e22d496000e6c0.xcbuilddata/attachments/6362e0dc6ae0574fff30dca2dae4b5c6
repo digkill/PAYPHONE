@@ -1,0 +1,4 @@
+module PayphoneKit {
+header "PayphoneKit-Swift.h"
+export *
+}

@@ -1,0 +1,16 @@
+---
+description: TUN MTU, full-tunnel routes, NAT, SIGINT teardown
+globs: payphone-tun/**/*.rs
+alwaysApply: false
+---
+
+# TUN and routing
+
+Details: `.cursor/memory/routing.md` and `gotchas.md`.
+
+- Subnet `10.77.0.0/24`, server `10.77.0.1`. Start MTU **1100**, max 1450 after path-MTU. Overhead 40 bytes.
+- Client full-tunnel: `0.0.0.0/1` + `128.0.0.0/1` via TUN, plus unscoped `/32` to the VPN server via LAN. Do not replace the default route.
+- IPv6: blackhole `::/1` and `8000::/1`. No in-tunnel IPv6.
+- macOS: no `networksetup`. Use `route -blackhole`, `scutil`, unscoped `/32`, `IP_BOUND_IF`. Route watchdog must be a separate interval, not inside the TUN `select`.
+- SIGINT: restore routes **before** QUIC `wait_idle`. Kill-switch default is off.
+- Linux server: idempotent iptables MASQUERADE + FORWARD; do not fail if `ip_forward` is already 1 on a read-only `/proc`.

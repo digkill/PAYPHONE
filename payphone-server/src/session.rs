@@ -3,7 +3,10 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,9 +15,13 @@ use quinn::Connection;
 use rand::RngCore;
 use tokio::sync::mpsc;
 
-use payphone_auth::{CLIENT_ID_SIZE, SubscriptionClaims, SubscriptionPlan, TOKEN_ID_SIZE};
+use payphone_auth::{
+    AuthError, CLIENT_ID_SIZE, RevocationStore, SubscriptionClaims, SubscriptionPlan,
+    SubscriptionVerifier, TOKEN_ID_SIZE,
+};
 
 use payphone_core::{
+    access_denied_dude::DenyReason,
     all_good_dude::{AllGoodDude, SERVER_NONCE_SIZE, SESSION_ID_SIZE},
     still_good_dude::StillGoodDude,
 };
@@ -60,7 +67,8 @@ impl ClientLink {
             }
 
             Self::Stream { tx, .. } => {
-                let _ = tx.send(bytes).await;
+                // IP loss is preferable to stalling every client behind this stream.
+                let _ = tx.try_send(bytes);
             }
 
             Self::Detached => {}
@@ -68,7 +76,11 @@ impl ClientLink {
     }
 
     pub fn is_live(&self) -> bool {
-        !matches!(self, Self::Detached)
+        match self {
+            Self::Quic(connection) => connection.close_reason().is_none(),
+            Self::Stream { tx, .. } => !tx.is_closed(),
+            Self::Detached => false,
+        }
     }
 
     fn matches_quic_stable_id(&self, stable_id: usize) -> bool {
@@ -211,7 +223,7 @@ pub struct Session {
     #[allow(dead_code)]
     pub created_at: Instant,
 
-    pub last_activity: Instant,
+    last_activity: Mutex<Instant>,
 
     pub last_rekey: Instant,
 
@@ -236,6 +248,37 @@ pub struct Session {
     pub max_mbps: u32,
 
     pub rate: RateLimit,
+}
+
+impl Session {
+    fn last_activity(&self) -> Instant {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn record_activity(&self) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Instant::now();
+    }
+
+    pub fn access_error<R: RevocationStore>(
+        &self,
+        verifier: &SubscriptionVerifier<R>,
+    ) -> Option<DenyReason> {
+        match verifier.verify_session_at(
+            &self.token_id,
+            self.subscription_expires_at,
+            unix_ms() / 1000,
+        ) {
+            Ok(()) => None,
+            Err(AuthError::Expired) => Some(DenyReason::SubscriptionExpired),
+            Err(_) => Some(DenyReason::TokenRevoked),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -327,7 +370,7 @@ impl SessionManager {
             capabilities,
             last_sequence: AtomicU64::new(last_sequence),
             created_at: now,
-            last_activity: now,
+            last_activity: Mutex::new(now),
             last_rekey: now,
             client_nonce,
             server_nonce: response.server_nonce,
@@ -388,7 +431,7 @@ impl SessionManager {
 
         session.last_sequence.store(sequence, Ordering::Relaxed);
 
-        session.last_activity = Instant::now();
+        session.record_activity();
 
         let still_good = StillGoodDude::new(session.id, session.ipv4, mtu, session.capabilities);
 
@@ -457,7 +500,8 @@ impl SessionManager {
             self.persist();
         }
 
-        Some(current)
+        // Only the transition from pending to current produces an acknowledgement.
+        dirty.then_some(current)
     }
 
     pub fn touch_session(
@@ -477,7 +521,7 @@ impl SessionManager {
                 return None;
             }
 
-            session.last_activity = Instant::now();
+            session.record_activity();
 
             if session.pending_nonce.is_some() {
                 (session.pending_nonce, false)
@@ -545,13 +589,37 @@ impl SessionManager {
             .find(|session| session.ipv4 == ipv4 && session.link.is_live())
     }
 
+    pub fn remove_invalid<R: RevocationStore>(
+        &mut self,
+        verifier: &SubscriptionVerifier<R>,
+    ) -> Vec<(Session, DenyReason)> {
+        let invalid: Vec<_> = self
+            .sessions
+            .values()
+            .filter_map(|session| {
+                session
+                    .access_error(verifier)
+                    .map(|reason| (session.id, reason))
+            })
+            .collect();
+        let removed: Vec<_> = invalid
+            .into_iter()
+            .filter_map(|(id, reason)| self.sessions.remove(&id).map(|session| (session, reason)))
+            .collect();
+        if !removed.is_empty() {
+            self.persist();
+        }
+        removed
+    }
+
     pub fn remove_expired(&mut self) -> usize {
         let now = Instant::now();
 
         let before = self.sessions.len();
 
-        self.sessions
-            .retain(|_id, session| now.duration_since(session.last_activity) < SESSION_TIMEOUT);
+        self.sessions.retain(|_id, session| {
+            now.saturating_duration_since(session.last_activity()) < SESSION_TIMEOUT
+        });
 
         let removed = before - self.sessions.len();
 
@@ -609,9 +677,9 @@ impl SessionManager {
             }
 
             if !session.link.is_live() {
-                replace_older(&mut detached, session.last_activity, session.id);
+                replace_older(&mut detached, session.last_activity(), session.id);
             } else {
-                replace_older(&mut live, session.last_activity, session.id);
+                replace_older(&mut live, session.last_activity(), session.id);
             }
         }
 
@@ -783,7 +851,7 @@ impl SessionManager {
                     capabilities,
                     last_sequence: AtomicU64::new(last_sequence),
                     created_at: now,
-                    last_activity: now,
+                    last_activity: Mutex::new(now),
                     last_rekey: now,
                     client_nonce,
                     server_nonce,
@@ -1048,6 +1116,8 @@ mod tests {
     #[test]
     fn rate_limit_blocks_after_burst() {
         let limit = RateLimit::new(1);
+        // Freeze refill so wall-clock scheduling cannot replenish the bucket.
+        limit.last_refill_ms.store(u64::MAX, Ordering::Relaxed);
 
         assert!(limit.allow(125_000));
 
@@ -1071,5 +1141,174 @@ mod tests {
         assert_eq!(last.load(Ordering::Relaxed), 2000);
         assert!(accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW + 1));
         assert!(!accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW));
+    }
+    #[test]
+    fn rekey_acknowledges_only_a_pending_rotation() {
+        let mut manager = SessionManager::new();
+        let (session, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(1, 5, 0),
+            )
+            .unwrap();
+        let nonce = manager
+            .rekey_offer(&session.session_id, dummy_addr())
+            .unwrap();
+        assert_eq!(
+            manager.rekey_confirm(&session.session_id, &[0; 32], dummy_addr()),
+            None
+        );
+        assert_eq!(
+            manager.rekey_confirm(&session.session_id, &nonce, dummy_addr()),
+            Some(nonce)
+        );
+        assert_eq!(
+            manager.rekey_confirm(&session.session_id, &nonce, dummy_addr()),
+            None
+        );
+        assert!(
+            manager
+                .resume_session(
+                    &session.session_id,
+                    &nonce,
+                    dummy_addr(),
+                    ClientLink::Detached,
+                    2,
+                    1100
+                )
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn full_tls_queue_drops_without_blocking_other_clients() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let link = ClientLink::Stream { id: 1, tx };
+        link.send(Bytes::from_static(b"first")).await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            link.send(Bytes::from_static(b"dropped")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"first"));
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        assert!(!link.is_live());
+    }
+
+    #[test]
+    fn data_activity_keeps_session_alive_but_idle_session_expires() {
+        let mut manager = SessionManager::new();
+        let (active, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(1, 5, 0),
+            )
+            .unwrap();
+        let (idle, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(2, 5, 0),
+            )
+            .unwrap();
+        for id in [active.session_id, idle.session_id] {
+            *manager.get(&id).unwrap().last_activity.lock().unwrap() =
+                Instant::now() - SESSION_TIMEOUT - Duration::from_secs(1);
+        }
+        manager.get(&active.session_id).unwrap().record_activity();
+        assert_eq!(manager.remove_expired(), 1);
+        assert!(manager.get(&active.session_id).is_some());
+        assert!(manager.get(&idle.session_id).is_none());
+    }
+
+    #[test]
+    fn revoke_and_expiry_remove_live_and_restored_sessions() {
+        use payphone_auth::{MemoryRevocationStore, VerificationKeyRing};
+        let mut manager = SessionManager::new();
+        let (revoked, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(1, 5, 0),
+            )
+            .unwrap();
+        let mut expired_claims = claims(2, 5, 0);
+        expired_claims.expires_at = 1;
+        let (expired, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &expired_claims,
+            )
+            .unwrap();
+        let (valid, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(3, 5, 0),
+            )
+            .unwrap();
+        let encoded = manager.encode_store();
+        let mut revocations = MemoryRevocationStore::new();
+        revocations.revoke(claims(1, 5, 0).token_id);
+        let verifier = SubscriptionVerifier::new(VerificationKeyRing::new(), revocations);
+        for mut store in [manager, SessionManager::decode_store(&encoded).unwrap()] {
+            assert_eq!(
+                store
+                    .get(&revoked.session_id)
+                    .unwrap()
+                    .access_error(&verifier),
+                Some(DenyReason::TokenRevoked)
+            );
+            assert_eq!(
+                store
+                    .get(&expired.session_id)
+                    .unwrap()
+                    .access_error(&verifier),
+                Some(DenyReason::SubscriptionExpired)
+            );
+            assert_eq!(store.remove_invalid(&verifier).len(), 2);
+            assert!(
+                store
+                    .resume_session(
+                        &revoked.session_id,
+                        &revoked.server_nonce,
+                        dummy_addr(),
+                        ClientLink::Detached,
+                        2,
+                        1100
+                    )
+                    .is_none()
+            );
+            assert!(store.get(&valid.session_id).is_some());
+        }
     }
 }

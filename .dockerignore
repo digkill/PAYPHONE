@@ -9,3 +9,11 @@ auth-keys/*
 !auth-keys/subscription-public.key
 subscription.token
 .payphone-session
+
+# Local configuration, deployment bundles and client credentials
+.env
+.env.*
+payphone.toml
+runtime
+state
+*.secret

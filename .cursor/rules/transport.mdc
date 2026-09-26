@@ -1,0 +1,16 @@
+---
+description: QUIC, UDP obfuscation, TLS front, REALITY
+globs: payphone-transport/**/*.rs
+alwaysApply: false
+---
+
+# Transport
+
+Details: `.cursor/memory/transport.md` and `gotchas.md`.
+
+- VPN uses Quinn **datagrams** + TLS 1.3. `send_vpn_datagram` drops on `TooLarge`; do not block TUN on `send_datagram_wait`.
+- Obfuscation is XOR+salt (not encryption). Invalid PSK → silent drop before Quinn. Padding 0–32 only — buckets broke PMTU.
+- `validate_passphrase`: length ≥ 16, not `change-me-to-a-real-random-secret`.
+- TCP 443: landing page for browsers; PAYPHONE frames after TLS. No UDP obfuscation on TCP.
+- REALITY is optional, TCP-only, Xray-compatible **outer** auth; inner protocol stays PAYPHONE. Default off. Do not copy dest EncryptedExtensions plaintext. Splice unauthorized hellos to dest; keep `PAYPHONE_TLS_DOMAIN` on the landing/ACME path.
+- Idle 180s, QUIC keepalive 3s, BBR. Do not revert Cubic or 30s Quinn defaults without a reason.

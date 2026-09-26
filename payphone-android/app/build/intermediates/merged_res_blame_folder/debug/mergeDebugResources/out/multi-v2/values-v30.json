@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.payphone.android.app-mergeDebugResources-56:/values-v30/values-v30.xml",
+            "map": [
+                {
+                    "source": "/Users/digkill/.gradle/caches/9.6.1/transforms/38f72ee14fda50535b4c3a05f6b1f043/transformed/material3-release/res/values-v30/values-v30.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "72",
+                        "endOffsets": "123"
+                    }
+                }
+            ]
+        }
+    ]
+}

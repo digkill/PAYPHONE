@@ -1,0 +1,7 @@
+com.payphone.android.app-updated_navigation_xml-0 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/build/generated/updated_navigation_xml/debug
+com.payphone.android.app-packageDebugResources-1 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+com.payphone.android.app-packageDebugResources-2 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+com.payphone.android.app-debug-3 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/build/intermediates/merged_res/debug/mergeDebugResources
+com.payphone.android.app-debug-4 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/src/debug/res
+com.payphone.android.app-main-5 /Users/digkill/Projects/Rust/PAYPHONE/payphone-android/app/src/main/res
+gradleHome-0 /Users/digkill/.gradle

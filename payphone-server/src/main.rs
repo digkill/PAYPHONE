@@ -405,6 +405,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )
                             .and_then(
                                 |session| {
+                                    if session.access_error(verifier.as_ref()).is_some() {
+                                        return None;
+                                    }
                                     if !session
                                         .rate
                                         .allow(
@@ -414,6 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         return None;
                                     }
 
+                                    session.record_activity();
                                     Some(
                                         (
                                             session.id,
@@ -488,9 +492,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .write()
                         .await;
 
-                let removed =
-                    manager
-                        .remove_expired();
+                let invalid = manager.remove_invalid(verifier.as_ref());
+                let removed = manager.remove_expired();
+                drop(manager);
+                for (session, reason) in invalid {
+                    handler::send_access_denied(&session.link, 0, reason, session.subscription_expires_at).await;
+                }
 
                 if removed > 0 {
                     println!(

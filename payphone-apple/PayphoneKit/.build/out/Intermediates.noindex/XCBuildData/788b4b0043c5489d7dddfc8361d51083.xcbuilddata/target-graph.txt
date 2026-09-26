@@ -1,0 +1,11 @@
+Target dependency graph (4 targets)
+Target 'AllIncludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'PayphoneKitTests-product' in project 'PayphoneKit'
+➜ Dependency on target 'PayphoneKitTests-product' in project 'PayphoneKit' via transitive dependency through 'PayphoneKitTests-test-runner'
+➜ Explicit dependency on target 'PayphoneKit-product' in project 'PayphoneKit'
+➜ Explicit dependency on target 'PayphoneKit' in project 'PayphoneKit'
+Target 'PayphoneKit-product' in project 'PayphoneKit'
+➜ Explicit dependency on target 'PayphoneKit' in project 'PayphoneKit'
+Target 'PayphoneKitTests-product' in project 'PayphoneKit'
+➜ Explicit dependency on target 'PayphoneKit' in project 'PayphoneKit'
+Target 'PayphoneKit' in project 'PayphoneKit' (no dependencies)

@@ -1,0 +1,46 @@
+# Custom Coolify Service: PAYPHONE / production / Model Daler.
+# PAYPHONE_OBFS_PSK is stored in Coolify environment variables, not this file.
+# Copy the existing node identity and state into these managed volumes before first start.
+services:
+  payphone-server:
+    image: payphone-model-daler:0.2.0
+    pull_policy: never
+    ports:
+      - "8443:40404/udp"
+      - "8443:40443/tcp"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      PAYPHONE_BIND_ADDR: "0.0.0.0:40404"
+      PAYPHONE_TCP_BIND_ADDR: "0.0.0.0:40443"
+      PAYPHONE_OBFS_PSK: "${PAYPHONE_OBFS_PSK}"
+      PAYPHONE_DEV_MODE: "false"
+      PAYPHONE_REALITY: "off"
+      PAYPHONE_TLS_SAN: "localhost,89.40.233.36"
+      PAYPHONE_AUTH_KEY: "/app/auth-keys/subscription-public.key"
+      PAYPHONE_SESSION_STORE: "/app/state/sessions.bin"
+      PAYPHONE_REVOKE_FILE: "/app/state/revoked-token-ids.txt"
+    volumes:
+      - certificates:/app/dev-certs
+      - session-state:/app/state
+    labels:
+      traefik.enable: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "test -e /sys/class/net/payphone0 && grep -q ':9DD4 ' /proc/net/udp && grep -q ':9DFB ' /proc/net/tcp"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+volumes:
+  certificates: {}
+  session-state: {}

@@ -1,0 +1,16 @@
+---
+description: PAYPHONE/1 wire frames — lengths, types, handshake
+globs: payphone-core/**/*.rs
+alwaysApply: false
+---
+
+# Wire protocol (`payphone-core`)
+
+Details: `.cursor/memory/protocol.md`.
+
+- `PROTOCOL_VERSION = 1`. Header is 16 bytes, big-endian. Unknown type/version → decode error.
+- One QUIC datagram = one `Frame`; `payload_len` must equal remaining bytes. TLS stream uses `payload_len_from_header`.
+- Keep frame names (`WhatsUpDude`, `AllGoodDude`, …). Max payload 64 KiB; auth token ≤ 2048 bytes.
+- `Data` = 16-byte session_id + 8-byte packet_id + IPv4. Do not put crypto or TUN logic in this crate.
+- Strict exact sizes for Ping/Pong (24), Close (17), BackAgainDude (48), StillGoodDude (26), AccessDeniedDude (9), AllGoodDude (59). `Rekey` is 16 or 48 only.
+- This crate must not depend on Quinn, TLS, Ed25519, or TUN.

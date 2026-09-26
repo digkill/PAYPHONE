@@ -43,13 +43,50 @@ pub async fn handle_frame(
 
     frame: Frame,
 ) {
+    // All established-session commands share the same current access policy.
+    if matches!(
+        frame.frame_type,
+        FrameType::Data | FrameType::Ping | FrameType::Rekey | FrameType::Close
+    ) {
+        let Some(id) = frame
+            .payload
+            .get(..16)
+            .and_then(|id| <[u8; 16]>::try_from(id).ok())
+        else {
+            return;
+        };
+        let denied = {
+            let manager = sessions.read().await;
+            let Some(session) = manager.get(&id) else {
+                return;
+            };
+            if session.client_address != client_address {
+                return;
+            }
+            session.access_error(verifier.as_ref())
+        };
+        if let Some(reason) = denied {
+            let removed = sessions.write().await.remove(&id);
+            if let Some(session) = removed {
+                send_access_denied(
+                    &session.link,
+                    frame.sequence,
+                    reason,
+                    session.subscription_expires_at,
+                )
+                .await;
+            }
+            return;
+        }
+    }
+
     match frame.frame_type {
         FrameType::WhatsUpDude => {
             handle_whats_up_dude(link, sessions, verifier, client_address, frame).await;
         }
 
         FrameType::BackAgainDude => {
-            handle_back_again_dude(link, sessions, client_address, frame).await;
+            handle_back_again_dude(link, sessions, verifier, client_address, frame).await;
         }
 
         FrameType::Data => {
@@ -195,7 +232,7 @@ async fn handle_whats_up_dude(
 
         flags: 0,
 
-        sequence: sequence + 1,
+        sequence: sequence.wrapping_add(1),
 
         payload: all_good.encode(),
     };
@@ -216,6 +253,8 @@ async fn handle_back_again_dude(
 
     sessions: Arc<RwLock<SessionManager>>,
 
+    verifier: Arc<PayphoneVerifier>,
+
     client_address: SocketAddr,
 
     frame: Frame,
@@ -228,19 +267,15 @@ async fn handle_back_again_dude(
         Err(_) => return,
     };
 
-    let expired = {
+    let denied = {
         let manager = sessions.read().await;
-
-        match manager.get(&message.session_id) {
-            Some(session) => unix_time() >= session.subscription_expires_at,
-
-            None => false,
-        }
+        manager
+            .get(&message.session_id)
+            .and_then(|session| session.access_error(verifier.as_ref()))
     };
-
-    if expired {
-        send_access_denied(&link, sequence, DenyReason::SubscriptionExpired, 0).await;
-
+    if let Some(reason) = denied {
+        sessions.write().await.remove(&message.session_id);
+        send_access_denied(&link, sequence, reason, 0).await;
         return;
     }
 
@@ -258,6 +293,7 @@ async fn handle_back_again_dude(
     };
 
     let Some(still_good) = resumed else {
+        send_access_denied(&link, sequence, DenyReason::InvalidToken, 0).await;
         return;
     };
 
@@ -268,7 +304,7 @@ async fn handle_back_again_dude(
 
         flags: 0,
 
-        sequence: sequence + 1,
+        sequence: sequence.wrapping_add(1),
 
         payload: still_good.encode(),
     };
@@ -320,13 +356,11 @@ async fn handle_data(
             return;
         }
 
-        if let Some(source) = ipv4_source(&data.payload) {
-            if source != session.ipv4 {
-                eprintln!("Spoofed VPN source address");
-
-                return;
-            }
+        if ipv4_source(&data.payload) != Some(session.ipv4) {
+            return;
         }
+
+        session.record_activity();
 
         true
     };
@@ -376,7 +410,7 @@ async fn handle_ping(
 
         flags: 0,
 
-        sequence: sequence + 1,
+        sequence: sequence.wrapping_add(1),
 
         payload: pong.encode(),
     };
@@ -388,7 +422,12 @@ async fn handle_ping(
     }
 }
 
-async fn send_access_denied(link: &ClientLink, sequence: u64, reason: DenyReason, expires_at: u64) {
+pub(crate) async fn send_access_denied(
+    link: &ClientLink,
+    sequence: u64,
+    reason: DenyReason,
+    expires_at: u64,
+) {
     let denied = AccessDeniedDude::new(reason, expires_at);
 
     let frame = Frame {
@@ -398,7 +437,7 @@ async fn send_access_denied(link: &ClientLink, sequence: u64, reason: DenyReason
 
         flags: 0,
 
-        sequence: sequence + 1,
+        sequence: sequence.wrapping_add(1),
 
         payload: denied.encode(),
     };

@@ -385,3 +385,7 @@ cargo fmt --all -- --check
 ## Security notice
 
 The default TLS identity is still self-signed with SNI `localhost`; the client pins `dev-certs/payphone-cert.der`. For a public name, set `PAYPHONE_TLS_DOMAIN` on the server (Let's Encrypt) or load PEM with `--tls-cert` / `--tls-key`. The client trusts public CAs when SNI looks like a real DNS name. The resume file is encrypted with a key derived from `PAYPHONE_OBFS_PSK`. Keep `auth-keys/subscription-private.key` secret.
+
+## Nodes
+
+[Model Daler — connection and operations](docs/model-daler.md): `89.40.233.36:8443`, QUIC and TLS, managed centrally in Coolify.

@@ -1,0 +1,8 @@
+lib/arm64-v8a/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
+lib/armeabi-v7a/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
+lib/x86/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
+lib/x86_64/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
+lib/arm64-v8a/libandroidx.graphics.path.so->androidx.graphics:graphics-path:1.0.1
+lib/armeabi-v7a/libandroidx.graphics.path.so->androidx.graphics:graphics-path:1.0.1
+lib/x86/libandroidx.graphics.path.so->androidx.graphics:graphics-path:1.0.1
+lib/x86_64/libandroidx.graphics.path.so->androidx.graphics:graphics-path:1.0.1

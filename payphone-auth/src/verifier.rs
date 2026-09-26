@@ -80,14 +80,25 @@ impl FileRevocationStore {
 
 impl RevocationStore for FileRevocationStore {
     fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool {
-        let mtime = fs::metadata(&self.path)
-            .and_then(|meta| meta.modified())
-            .ok();
         let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+        let mtime = match fs::metadata(&self.path).and_then(|meta| meta.modified()) {
+            Ok(mtime) => Some(mtime),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A removed/unmounted file must not forget known revocations.
+                return cache.1.contains(token_id);
+            }
+            Err(_) => return true,
+        };
 
         if cache.0 != mtime {
-            cache.1 = load_revoked_ids(&self.path);
-            cache.0 = mtime;
+            match fs::read_to_string(&self.path) {
+                Ok(text) => {
+                    cache.1 = text.lines().filter_map(parse_token_id_hex).collect();
+                    cache.0 = mtime;
+                }
+                // Retry on the next check; never authorize using an unreadable store.
+                Err(_) => return true,
+            }
         }
 
         cache.1.contains(token_id)
@@ -159,6 +170,22 @@ where
 {
     pub fn new(keys: VerificationKeyRing, revocations: R) -> Self {
         Self { keys, revocations }
+    }
+
+    /// Recheck an already authenticated session, including restored disk state.
+    pub fn verify_session_at(
+        &self,
+        token_id: &[u8; TOKEN_ID_SIZE],
+        expires_at: u64,
+        now: u64,
+    ) -> Result<(), AuthError> {
+        if now >= expires_at {
+            return Err(AuthError::Expired);
+        }
+        if self.revocations.is_revoked(token_id) {
+            return Err(AuthError::Revoked);
+        }
+        Ok(())
     }
 
     /// Полная проверка token.
@@ -241,5 +268,40 @@ where
         // Возвращаем уже ПРОВЕРЕННЫЕ claims.
         //
         Ok(claims.clone())
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_ids_survive_missing_file_and_unreadable_store_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "payphone-revocation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("revoked.txt");
+        let store = FileRevocationStore::open(&path);
+        let revoked = [42; TOKEN_ID_SIZE];
+        let valid = [43; TOKEN_ID_SIZE];
+        assert!(!store.is_revoked(&valid));
+        fs::write(&path, token_id_hex(&revoked)).unwrap();
+        assert!(store.is_revoked(&revoked));
+        assert!(!store.is_revoked(&valid));
+        fs::remove_file(&path).unwrap();
+        assert!(store.is_revoked(&revoked));
+        // A directory reliably gives a read error even when tests run as root.
+        fs::create_dir(&path).unwrap();
+        assert!(store.is_revoked(&valid));
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, token_id_hex(&revoked)).unwrap();
+        assert!(!store.is_revoked(&valid));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

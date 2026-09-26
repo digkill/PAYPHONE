@@ -1,0 +1,20 @@
+com.payphone.android
+color matrix_black
+color matrix_green
+color matrix_green_bright
+color matrix_green_dim
+color matrix_green_head
+drawable ic_launcher_foreground
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
+string connect
+string disconnect
+string psk_hint
+string server_hint
+string tagline
+string token_hint
+string vpn_notification_text
+string vpn_notification_title
+style Theme_PAYPHONE
+xml network_security_config

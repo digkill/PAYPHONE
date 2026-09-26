@@ -1,0 +1,560 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		11C7AFDA654AE3D54E45875B /* TunnelEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4275A20F5E062154F3BC7E85 /* TunnelEngine.swift */; };
+		1F4D8835F2DC49D27564BF38 /* PayphoneKit in Frameworks */ = {isa = PBXBuildFile; productRef = 2436A1B0ECE1E51C6F83A666 /* PayphoneKit */; };
+		2C58C25E1B570171007566F3 /* RainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C531AF32FC9A0B43B88884D /* RainView.swift */; };
+		6024079C3FB538C0661527B7 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B560B3418183EE016ABDB3 /* SettingsView.swift */; };
+		668F584D6F78EC8963C2AAD7 /* VpnManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53017B03D09A3474FED8FBAB /* VpnManager.swift */; };
+		6FDE8F0F50ADDF9AD5D75F24 /* PayphoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B9348EB7A2DC31E159928C /* PayphoneApp.swift */; };
+		7C81FCCA40CD2E2CD47FF6F9 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8441BDC1A9231E4BA6A8108E /* PacketTunnelProvider.swift */; };
+		893F4284DFBE1B9E8050FB32 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = FB3140E92F23ADD233E8D581 /* AppIcon.icon */; };
+		C07E15C84D3DE0E84D5D3FF4 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C1F97D305E62FD69C8B368F /* ContentView.swift */; };
+		C3718AEC86DB28B4530FF462 /* PayphoneKit in Frameworks */ = {isa = PBXBuildFile; productRef = 27DB056B93CBA404635A169D /* PayphoneKit */; };
+		C585268399AEC00DA526CE18 /* PayphoneTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B349A0AA5D225AB1F6CAB3E4 /* PayphoneTunnel.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		77D71791DFB8C8A14330E91F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = ACD792B469C24BBB2A8C08A8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C71F0D06B22FF72D6417F90F;
+			remoteInfo = PayphoneTunnel;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		31D1CE3366209AF4A46760C2 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C585268399AEC00DA526CE18 /* PayphoneTunnel.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		24B86A3E9B409DAFE6C33D8E /* PayphoneApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PayphoneApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2C1F97D305E62FD69C8B368F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		3C531AF32FC9A0B43B88884D /* RainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RainView.swift; sourceTree = "<group>"; };
+		4275A20F5E062154F3BC7E85 /* TunnelEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelEngine.swift; sourceTree = "<group>"; };
+		53017B03D09A3474FED8FBAB /* VpnManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VpnManager.swift; sourceTree = "<group>"; };
+		8441BDC1A9231E4BA6A8108E /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		904A42708748CE7AF8D0B1D1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		96E37CC34B299BE097DFD86E /* PayphoneKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = PayphoneKit; path = PayphoneKit; sourceTree = SOURCE_ROOT; };
+		A0B560B3418183EE016ABDB3 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		AB5D5F080F87305BD14FFC8F /* Tunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Tunnel.entitlements; sourceTree = "<group>"; };
+		B349A0AA5D225AB1F6CAB3E4 /* PayphoneTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PayphoneTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BF8DEA5AFF62371EECDCF1C6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		E8B9348EB7A2DC31E159928C /* PayphoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PayphoneApp.swift; sourceTree = "<group>"; };
+		F8D7E1DC5269172E32FCDABA /* Payphone.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Payphone.entitlements; sourceTree = "<group>"; };
+		FB3140E92F23ADD233E8D581 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		0F02AB25A7CC7BF92CBAA29D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C3718AEC86DB28B4530FF462 /* PayphoneKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4833736845A06E5134AC1385 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1F4D8835F2DC49D27564BF38 /* PayphoneKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		28B682DBC76769421998425D /* App */ = {
+			isa = PBXGroup;
+			children = (
+				2C1F97D305E62FD69C8B368F /* ContentView.swift */,
+				904A42708748CE7AF8D0B1D1 /* Info.plist */,
+				F8D7E1DC5269172E32FCDABA /* Payphone.entitlements */,
+				E8B9348EB7A2DC31E159928C /* PayphoneApp.swift */,
+				3C531AF32FC9A0B43B88884D /* RainView.swift */,
+				A0B560B3418183EE016ABDB3 /* SettingsView.swift */,
+				53017B03D09A3474FED8FBAB /* VpnManager.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		4712E31AACE9685DEF0E1945 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				96E37CC34B299BE097DFD86E /* PayphoneKit */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		73D8A70DA52A3E1F858353F8 = {
+			isa = PBXGroup;
+			children = (
+				FB3140E92F23ADD233E8D581 /* AppIcon.icon */,
+				28B682DBC76769421998425D /* App */,
+				4712E31AACE9685DEF0E1945 /* Packages */,
+				E6B19AEC73B5F9541B93E580 /* TunnelProvider */,
+				EF504ED30C986922EB607C5D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E6B19AEC73B5F9541B93E580 /* TunnelProvider */ = {
+			isa = PBXGroup;
+			children = (
+				BF8DEA5AFF62371EECDCF1C6 /* Info.plist */,
+				8441BDC1A9231E4BA6A8108E /* PacketTunnelProvider.swift */,
+				AB5D5F080F87305BD14FFC8F /* Tunnel.entitlements */,
+				4275A20F5E062154F3BC7E85 /* TunnelEngine.swift */,
+			);
+			path = TunnelProvider;
+			sourceTree = "<group>";
+		};
+		EF504ED30C986922EB607C5D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				24B86A3E9B409DAFE6C33D8E /* PayphoneApp.app */,
+				B349A0AA5D225AB1F6CAB3E4 /* PayphoneTunnel.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		93A2B6F9A0F8306DFD7134CC /* PayphoneApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D4A565A876E96BF31B538DFC /* Build configuration list for PBXNativeTarget "PayphoneApp" */;
+			buildPhases = (
+				139E4FB2A3EA34DC16787720 /* Sources */,
+				774EFBE2587ABD6677864087 /* Resources */,
+				4833736845A06E5134AC1385 /* Frameworks */,
+				31D1CE3366209AF4A46760C2 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2C36FB2B735A46B01A8EB635 /* PBXTargetDependency */,
+			);
+			name = PayphoneApp;
+			packageProductDependencies = (
+				2436A1B0ECE1E51C6F83A666 /* PayphoneKit */,
+			);
+			productName = PayphoneApp;
+			productReference = 24B86A3E9B409DAFE6C33D8E /* PayphoneApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C71F0D06B22FF72D6417F90F /* PayphoneTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 18CF5139F943EEE8F9A6C327 /* Build configuration list for PBXNativeTarget "PayphoneTunnel" */;
+			buildPhases = (
+				C23DFC1506FB4F8D44E4FF9F /* Sources */,
+				0F02AB25A7CC7BF92CBAA29D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PayphoneTunnel;
+			packageProductDependencies = (
+				27DB056B93CBA404635A169D /* PayphoneKit */,
+			);
+			productName = PayphoneTunnel;
+			productReference = B349A0AA5D225AB1F6CAB3E4 /* PayphoneTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		ACD792B469C24BBB2A8C08A8 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					93A2B6F9A0F8306DFD7134CC = {
+						DevelopmentTeam = 39CP3623CD;
+						ProvisioningStyle = Automatic;
+					};
+					C71F0D06B22FF72D6417F90F = {
+						DevelopmentTeam = 39CP3623CD;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 4A17C11D6B103BF514E42BBD /* Build configuration list for PBXProject "Payphone" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 73D8A70DA52A3E1F858353F8;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				80D25BC466EEE27D759A93D8 /* XCLocalSwiftPackageReference "PayphoneKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = EF504ED30C986922EB607C5D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				93A2B6F9A0F8306DFD7134CC /* PayphoneApp */,
+				C71F0D06B22FF72D6417F90F /* PayphoneTunnel */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		774EFBE2587ABD6677864087 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				893F4284DFBE1B9E8050FB32 /* AppIcon.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		139E4FB2A3EA34DC16787720 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C07E15C84D3DE0E84D5D3FF4 /* ContentView.swift in Sources */,
+				6FDE8F0F50ADDF9AD5D75F24 /* PayphoneApp.swift in Sources */,
+				2C58C25E1B570171007566F3 /* RainView.swift in Sources */,
+				6024079C3FB538C0661527B7 /* SettingsView.swift in Sources */,
+				668F584D6F78EC8963C2AAD7 /* VpnManager.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C23DFC1506FB4F8D44E4FF9F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7C81FCCA40CD2E2CD47FF6F9 /* PacketTunnelProvider.swift in Sources */,
+				11C7AFDA654AE3D54E45875B /* TunnelEngine.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2C36FB2B735A46B01A8EB635 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C71F0D06B22FF72D6417F90F /* PayphoneTunnel */;
+			targetProxy = 77D71791DFB8C8A14330E91F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		6D43EF88E9461FD2BA8ACD68 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		7D6F9BAB94BD1AB21914EEEC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TunnelProvider/Tunnel.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TunnelProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.mediarise.payphone.tunnel;
+				PRODUCT_NAME = PayphoneTunnel;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		83A2E7B079BC1E8211D8EFB1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TunnelProvider/Tunnel.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TunnelProvider/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.mediarise.payphone.tunnel;
+				PRODUCT_NAME = PayphoneTunnel;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		90CB10C53F3390A478F81F6A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/Payphone.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.mediarise.payphone;
+				PRODUCT_NAME = Payphone;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		939FD58D8ECCC2B5A3408A49 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		AE535CE1B3157AAC37408498 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/Payphone.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 39CP3623CD;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.mediarise.payphone;
+				PRODUCT_NAME = Payphone;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		18CF5139F943EEE8F9A6C327 /* Build configuration list for PBXNativeTarget "PayphoneTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				83A2E7B079BC1E8211D8EFB1 /* Debug */,
+				7D6F9BAB94BD1AB21914EEEC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		4A17C11D6B103BF514E42BBD /* Build configuration list for PBXProject "Payphone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				939FD58D8ECCC2B5A3408A49 /* Debug */,
+				6D43EF88E9461FD2BA8ACD68 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D4A565A876E96BF31B538DFC /* Build configuration list for PBXNativeTarget "PayphoneApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				90CB10C53F3390A478F81F6A /* Debug */,
+				AE535CE1B3157AAC37408498 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		80D25BC466EEE27D759A93D8 /* XCLocalSwiftPackageReference "PayphoneKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = PayphoneKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2436A1B0ECE1E51C6F83A666 /* PayphoneKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PayphoneKit;
+		};
+		27DB056B93CBA404635A169D /* PayphoneKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PayphoneKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = ACD792B469C24BBB2A8C08A8 /* Project object */;
+}

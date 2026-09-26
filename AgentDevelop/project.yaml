@@ -1,0 +1,8 @@
+slug: payphone
+name: PAYPHONE
+kind: vpn
+status: prototype
+website: https://github.com/digkill/PAYPHONE
+repo: https://github.com/digkill/PAYPHONE
+stack: [Rust, QUIC, Quinn, TUN, TLS 1.3, Ed25519]
+related: []

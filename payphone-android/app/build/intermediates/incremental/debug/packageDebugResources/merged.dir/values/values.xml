@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="matrix_black">#FF000000</color>
+    <color name="matrix_green">#FF00FF41</color>
+    <color name="matrix_green_bright">#FF39FF14</color>
+    <color name="matrix_green_dim">#FF008F11</color>
+    <color name="matrix_green_head">#FFE0FFE0</color>
+    <string name="app_name">PAYPHONE</string>
+    <string name="connect">Jack in</string>
+    <string name="disconnect">Unplug</string>
+    <string name="psk_hint">PAYPHONE_OBFS_PSK (shared secret)</string>
+    <string name="server_hint">127.0.0.1:40404 or vpn.example.com:443</string>
+    <string name="tagline">Follow the white rabbit.</string>
+    <string name="token_hint">Subscription token (135 bytes, file or paste)</string>
+    <string name="vpn_notification_text">All traffic rides the matrix.</string>
+    <string name="vpn_notification_title">PAYPHONE tunnel</string>
+    <style name="Theme.PAYPHONE" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/matrix_black</item>
+        <item name="android:navigationBarColor">@color/matrix_black</item>
+        <item name="android:windowBackground">@color/matrix_black</item>
+    </style>
+</resources>

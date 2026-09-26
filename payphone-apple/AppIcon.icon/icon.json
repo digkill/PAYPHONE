@@ -1,0 +1,85 @@
+{
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "extended-srgb:0.010,0.050,0.016,1.00000",
+          "extended-srgb:0.000,0.008,0.003,1.00000"
+        ]
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "extended-srgb:0.004,0.024,0.008,1.00000",
+          "extended-srgb:0.000,0.002,0.001,1.00000"
+        ]
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "blur-material" : 0.18,
+      "lighting" : "combined",
+      "name" : "Digital rain",
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "glass" : true,
+          "image-name" : "01-rain.png",
+          "name" : "Falling code",
+          "opacity" : 0.92
+        }
+      ],
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.16
+      }
+    },
+    {
+      "blur-material" : 0.08,
+      "lighting" : "individual",
+      "name" : "White rabbit",
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "glass" : true,
+          "image-name" : "02-rabbit.png",
+          "name" : "Follow the white rabbit",
+          "specular" : "outside"
+        }
+      ],
+      "refractivity" : {
+        "depth" : 0.22,
+        "enabled" : true,
+        "strength" : 0.32
+      },
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.32
+      },
+      "specular" : true,
+      "specular-highlight-placement" : "outside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.08
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "iOS",
+      "macOS"
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="matrix_black">#FF000000</color>
+    <color name="matrix_green">#FF00FF41</color>
+    <color name="matrix_green_bright">#FF39FF14</color>
+    <color name="matrix_green_dim">#FF008F11</color>
+    <color name="matrix_green_head">#FFE0FFE0</color>
+    <style name="Theme.PAYPHONE" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/matrix_black</item>
+        <item name="android:navigationBarColor">@color/matrix_black</item>
+        <item name="android:windowBackground">@color/matrix_black</item>
+    </style>
+</resources>

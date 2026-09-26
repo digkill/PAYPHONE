@@ -72,7 +72,7 @@ pub async fn run_tunnel(
     quic: Option<QuicShutdown>,
     kill_switch: bool,
 ) -> Result<TunnelExit, Box<dyn std::error::Error>> {
-    let mut tun_mtu = sink.tun_mtu().max(active.mtu);
+    let mut tun_mtu = PAYPHONE_MTU.min(active.mtu);
 
     let tun = create_client_tun(active.assigned_ipv4, tun_mtu)?;
 
@@ -132,6 +132,9 @@ pub async fn run_tunnel(
     let mut rain_tick = time::interval(Duration::from_millis(50));
 
     rain_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+    let ping_timer = time::sleep(crate::random_ping_interval());
+    tokio::pin!(ping_timer);
 
     loop {
         tokio::select! {
@@ -282,7 +285,8 @@ pub async fn run_tunnel(
                 }
             }
 
-            _ = time::sleep(crate::random_ping_interval()) => {
+            _ = &mut ping_timer => {
+                ping_timer.as_mut().reset(time::Instant::now() + crate::random_ping_interval());
                 let ping = Ping::new(active.session_id, ping_id);
 
                 let frame = Frame {

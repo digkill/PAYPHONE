@@ -1,0 +1,18 @@
+[
+    {
+        "merged": "com.payphone.android.app-debug-58:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "com.payphone.android.app-main-60:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "com.payphone.android.app-debug-58:/drawable_ic_launcher_foreground.xml.flat",
+        "source": "com.payphone.android.app-main-60:/drawable/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "com.payphone.android.app-debug-58:/xml_network_security_config.xml.flat",
+        "source": "com.payphone.android.app-main-60:/xml/network_security_config.xml"
+    },
+    {
+        "merged": "com.payphone.android.app-debug-58:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "com.payphone.android.app-main-60:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    }
+]

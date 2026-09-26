@@ -1,0 +1,17 @@
+---
+description: Session lifecycle, handler dispatch, client resume
+globs: payphone-server/**/*.rs,payphone-client/**/*.rs
+alwaysApply: false
+---
+
+# Server and client
+
+Details: `.cursor/memory/architecture.md`, `protocol.md`, `config.md`.
+
+- Settings: CLI > env > `payphone.toml` > defaults. Load from repo-root CWD.
+- Server capabilities: `CAP_IPV4 | CAP_DNS | CAP_RESUME` only. Drop DATA whose IPv4 source ≠ assigned address.
+- Sessions: idle 300s, rekey 3600s, sequence reorder window 1024. Store magic `PAYS`. Device limit evicts oldest session (`CloseReason::Replaced`).
+- Client resume file `.payphone-session`: magic `PAYE`, ChaCha20-Poly1305, key `SHA256("payphone-session-v1" || psk)`.
+- Ping jitter 7–14s. DNS stub is `10.77.0.1:53`.
+- Matrix TUI (`matrix.rs`): half-width katakana only.
+- Do not enable REALITY in server compose without dest + keys.

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PAYPHONE</string>
+    <string name="tagline">Follow the white rabbit.</string>
+    <string name="vpn_notification_title">PAYPHONE tunnel</string>
+    <string name="vpn_notification_text">All traffic rides the matrix.</string>
+    <string name="connect">Jack in</string>
+    <string name="disconnect">Unplug</string>
+    <string name="server_hint">127.0.0.1:40404 or vpn.example.com:443</string>
+    <string name="psk_hint">PAYPHONE_OBFS_PSK (shared secret)</string>
+    <string name="token_hint">Subscription token (135 bytes, file or paste)</string>
+</resources>

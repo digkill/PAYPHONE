@@ -177,6 +177,15 @@ pub fn create_server_tun() -> io::Result<SharedTun> {
     Ok(Arc::new(device))
 }
 
+fn valid_ipv4_packet(packet: &[u8]) -> bool {
+    if packet.len() < 20 || packet[0] >> 4 != 4 {
+        return false;
+    }
+    let header_len = usize::from(packet[0] & 0x0f) * 4;
+    let total_len = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    header_len >= 20 && header_len <= total_len && total_len == packet.len()
+}
+
 /// Извлекает IPv4 destination
 /// из настоящего IP packet.
 ///
@@ -188,7 +197,7 @@ pub fn create_server_tun() -> io::Result<SharedTun> {
 /// BYTE 16-19:
 /// destination IPv4
 pub fn ipv4_destination(packet: &[u8]) -> Option<[u8; 4]> {
-    if packet.len() < 20 {
+    if !valid_ipv4_packet(packet) {
         return None;
     }
 
@@ -210,7 +219,7 @@ pub fn ipv4_destination(packet: &[u8]) -> Option<[u8; 4]> {
 /// Полезно для проверки
 /// клиентского packet.
 pub fn ipv4_source(packet: &[u8]) -> Option<[u8; 4]> {
-    if packet.len() < 20 {
+    if !valid_ipv4_packet(packet) {
         return None;
     }
 
@@ -233,6 +242,7 @@ mod tests {
         // IPv4 + IHL 5.
         //
         packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&20u16.to_be_bytes());
 
         packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
 
@@ -250,5 +260,22 @@ mod tests {
         assert_eq!(mtu_from_datagram_budget(1440), 1400);
         assert_eq!(mtu_from_datagram_budget(1490), PAYPHONE_MTU_MAX);
         assert_eq!(mtu_from_datagram_budget(40), PAYPHONE_MTU);
+    }
+    #[test]
+    fn rejects_non_ipv4_and_inconsistent_packet_lengths() {
+        let mut packet = [0u8; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+        assert!(ipv4_source(&packet).is_some());
+        for first in [0x60, 0x44, 0x46] {
+            packet[0] = first;
+            assert_eq!(ipv4_source(&packet), None);
+            assert_eq!(ipv4_destination(&packet), None);
+        }
+        packet[0] = 0x45;
+        packet[3] = 21;
+        assert_eq!(ipv4_source(&packet), None);
+        packet[3] = 19;
+        assert_eq!(ipv4_source(&packet), None);
     }
 }

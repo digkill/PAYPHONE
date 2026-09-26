@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.payphone.android.client.HandshakeTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-26T20:41:22.218Z" hostname="Digkills-MacBook-Pro.local" time="0.072">
+  <properties/>
+  <testcase name="unknownSessionFallsBackButRevocationIsTerminal" classname="com.payphone.android.client.HandshakeTest" time="0.063"/>
+  <testcase name="resumeSavesRotatedNonce" classname="com.payphone.android.client.HandshakeTest" time="0.003"/>
+  <testcase name="freshSessionSavesRotatedNonce" classname="com.payphone.android.client.HandshakeTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

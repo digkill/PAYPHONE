@@ -1,0 +1,16 @@
+---
+description: PAYPHONE project memory — load before editing this repo
+alwaysApply: true
+---
+
+# PAYPHONE agent context
+
+This is an experimental IPv4 VPN (Rust 2024, v0.2.0). Before architecture or protocol work, read `.cursor/memory/README.md`, then `overview.md` and `conventions.md`. Pick one topic file for the task (`protocol`, `transport`, `auth`, `routing`, `config`, `gotchas`). Code wins over README and `docs/`.
+
+- Datagrams for IP, not QUIC streams. Use `send_vpn_datagram`, not `send_datagram_wait`.
+- TUN MTU starts at 1100 (40-byte PAYPHONE headers). Do not “fix” it to 1280.
+- Obfuscation pad is 0–32 bytes. Do not restore size buckets.
+- Inner frames stay PAYPHONE. Do not add VLESS. REALITY default is off.
+- Never commit secrets or bake `subscription-private.key` into Docker.
+- `PAYPHONE_OBFS_PSK` is mandatory; reject the `.env.example` placeholder.
+- Update `.cursor/memory/` in the same change when an invariant moves.

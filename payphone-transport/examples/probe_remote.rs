@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let payload = vec![0xABu8; MAX_FRAME_SIZE];
 
     println!("sending {MAX_FRAME_SIZE}-byte max-size PAYPHONE frame as a raw QUIC datagram...");
-    connection.send_datagram_wait(payload.into()).await?;
+    payphone_transport::send_vpn_datagram(&connection, payload.into())?;
     println!("OK: max-size datagram sent without TooLarge");
 
     connection.close(0u32.into(), b"probe done");

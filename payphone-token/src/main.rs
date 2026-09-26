@@ -326,12 +326,16 @@ fn init_reality_keys() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all("auth-keys")?;
 
     let mut seed = [0u8; 32];
-    OsRng.try_fill_bytes(&mut seed)?;
+    OsRng
+        .try_fill_bytes(&mut seed)
+        .map_err(|error| format!("OS randomness failed: {error:?}"))?;
     let secret = x25519_dalek::StaticSecret::from(seed);
     let public = x25519_dalek::PublicKey::from(&secret);
 
     let mut short_id = [0u8; 8];
-    OsRng.try_fill_bytes(&mut short_id)?;
+    OsRng
+        .try_fill_bytes(&mut short_id)
+        .map_err(|error| format!("OS randomness failed: {error:?}"))?;
     let short_hex = hex(&short_id);
 
     fs::write(REALITY_PRIVATE_PATH, secret.to_bytes())?;
@@ -573,9 +577,10 @@ fn revoke_token(arg: &str) -> Result<(), Box<dyn std::error::Error>> {
         parse_token_id_hex(arg).ok_or("expected a token file or 32-char hex token_id")?
     };
 
-    append_revoked_id(Path::new(REVOKED_PATH), token_id)?;
+    let revoke_path = env::var("PAYPHONE_REVOKE_FILE").unwrap_or_else(|_| REVOKED_PATH.into());
+    append_revoked_id(Path::new(&revoke_path), token_id)?;
     println!("Revoked {}", token_id_hex(&token_id));
-    println!("File: {REVOKED_PATH}");
+    println!("File: {revoke_path}");
     println!("Restart is not required; the server re-reads the file on each auth.");
     Ok(())
 }

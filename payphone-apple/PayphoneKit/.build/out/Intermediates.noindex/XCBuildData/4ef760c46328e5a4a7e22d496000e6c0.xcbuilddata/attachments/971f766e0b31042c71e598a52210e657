@@ -1,0 +1,39 @@
+{
+  "" : {
+    "diagnostics" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/PayphoneKitTests-primary.dia",
+    "emit-module-dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/PayphoneKitTests-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/PayphoneKitTests-primary-emit-module.dia",
+    "pch" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/PayphoneKitTests-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/PayphoneKitTests-primary.swiftdeps"
+  },
+  "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/DerivedSources/test_entry_point.swift" : {
+    "const-values" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.swiftconstvalues",
+    "dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.d",
+    "diagnostics" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.dia",
+    "index-unit-output-path" : "/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.o",
+    "llvm-bc" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.bc",
+    "object" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.o",
+    "swift-dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point.swiftdeps",
+    "swiftmodule" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/test_entry_point~partial.swiftmodule"
+  },
+  "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/Tests/PayphoneKitTests/ObfuscationTests.swift" : {
+    "const-values" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.swiftconstvalues",
+    "dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.d",
+    "diagnostics" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.dia",
+    "index-unit-output-path" : "/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.o",
+    "llvm-bc" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.bc",
+    "object" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.o",
+    "swift-dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests.swiftdeps",
+    "swiftmodule" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ObfuscationTests~partial.swiftmodule"
+  },
+  "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/Tests/PayphoneKitTests/ProtocolTests.swift" : {
+    "const-values" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.swiftconstvalues",
+    "dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.d",
+    "diagnostics" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.dia",
+    "index-unit-output-path" : "/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.o",
+    "llvm-bc" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.bc",
+    "object" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.o",
+    "swift-dependencies" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests.swiftdeps",
+    "swiftmodule" : "/Users/digkill/Projects/Rust/PAYPHONE/payphone-apple/PayphoneKit/.build/out/Intermediates.noindex/PayphoneKit.build/Debug/PayphoneKitTests-p.build/Objects-normal/arm64/ProtocolTests~partial.swiftmodule"
+  }
+}

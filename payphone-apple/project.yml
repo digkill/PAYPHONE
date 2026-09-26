@@ -1,0 +1,83 @@
+name: Payphone
+
+options:
+  bundleIdPrefix: org.mediarise.payphone
+  createIntermediateGroups: true
+  xcodeVersion: "2700"
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "13.0"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 39CP3623CD
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    SWIFT_VERSION: "6.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+    STRING_CATALOG_GENERATE_SYMBOLS: YES
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+
+packages:
+  PayphoneKit:
+    path: PayphoneKit
+
+targets:
+  PayphoneTunnel:
+    type: app-extension
+    platform: auto
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - TunnelProvider
+    dependencies:
+      - package: PayphoneKit
+        product: PayphoneKit
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 39CP3623CD
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        PRODUCT_BUNDLE_IDENTIFIER: org.mediarise.payphone.tunnel
+        PRODUCT_NAME: PayphoneTunnel
+        INFOPLIST_FILE: TunnelProvider/Info.plist
+        CODE_SIGN_ENTITLEMENTS: TunnelProvider/Tunnel.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SWIFT_VERSION: "6.0"
+
+  PayphoneApp:
+    type: application
+    platform: auto
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - App
+      - AppIcon.icon
+    dependencies:
+      - package: PayphoneKit
+        product: PayphoneKit
+      - target: PayphoneTunnel
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        DEVELOPMENT_TEAM: 39CP3623CD
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_BUNDLE_IDENTIFIER: org.mediarise.payphone
+        PRODUCT_NAME: Payphone
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Payphone.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        SWIFT_VERSION: "6.0"
+
+schemes:
+  PayphoneApp:
+    build:
+      targets:
+        PayphoneApp: all
+    run:
+      config: Debug
+    test:
+      config: Debug

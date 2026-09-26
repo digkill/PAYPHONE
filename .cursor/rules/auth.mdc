@@ -1,0 +1,15 @@
+---
+description: Ed25519 subscription tokens, plans, revocation
+globs: payphone-auth/**/*.rs,payphone-token/**/*.rs
+alwaysApply: false
+---
+
+# Auth and tokens
+
+Details: `.cursor/memory/auth.md`.
+
+- Token is a fixed 135-byte `PAYT` v1 document. `decode` is not `verify`.
+- Server key_id is **1** for `auth-keys/subscription-public.key`. Private key never ships to clients or Docker images.
+- Plans: basic 1/100, pro 5/500, unlimited 255/0. `max_mbps == 0` means no cap.
+- Revoke file: hex `token_id` per line, re-read on mtime. Missing file = empty set.
+- `payphone-token` subcommands: `init`, `issue`, `setup`, `revoke`, `reality-init`. Do not invent a login/password path beside this token.
