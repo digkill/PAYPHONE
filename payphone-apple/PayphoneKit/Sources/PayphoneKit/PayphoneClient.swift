@@ -47,24 +47,29 @@ public final class PayphoneClient: Sendable {
         self.obfuscationKey = obfuscationKey
     }
 
-    /// Connects over TCP+TLS and runs the handshake (resume if `saved` is
-    /// given and the server still recognizes it, otherwise a fresh
-    /// `WhatsUpDude`). QUIC is intentionally not wired here yet — see
-    /// the project plan for why.
+    /// Connects with the selected transport, then authenticates or resumes.
     public func connect(
         server: String,
         tlsTrust: TlsTrustConfig,
-        saved: SavedSession?
+        saved: SavedSession?,
+        transport: TransportKind = .tls
     ) async throws -> (transport: FrameTransport, result: HandshakeResult) {
         let (host, udpPort) = try resolveServer(server)
-        let (_, port) = try tcpPort(forUdpPort: udpPort, explicitTcp: nil)
+        let (_, tcp) = try tcpPort(forUdpPort: udpPort, explicitTcp: nil)
+        let port = transport == .quic ? udpPort : tcp
 
         let sni = tlsTrust.serverName.isEmpty
             ? (looksLikePublicDNS(host) ? host : "localhost")
             : tlsTrust.serverName
 
         let trust = TlsTrustConfig(serverName: sni, pinnedCertDER: tlsTrust.pinnedCertDER)
-        var channel = try await TlsFrameChannel.connect(host: host, port: port, trust: trust)
+        func makeChannel() async throws -> any FrameTransport {
+            switch transport {
+            case .quic: return try await QuicFrameChannel.connect(host: host, port: port, trust: trust, key: obfuscationKey)
+            case .tls: return try await TlsFrameChannel.connect(host: host, port: port, trust: trust)
+            }
+        }
+        var channel = try await makeChannel()
         do {
             if let saved {
                 do {
@@ -75,7 +80,7 @@ public final class PayphoneClient: Sendable {
                     // A cancelled/partial stream read cannot safely be reused.
                     channel.close()
                     try Task.checkCancellation()
-                    channel = try await TlsFrameChannel.connect(host: host, port: port, trust: trust)
+                    channel = try await makeChannel()
                 }
             }
             return (channel, try await createNewSession(channel))

@@ -8,6 +8,11 @@ members = [
     "payphone-client",
     "payphone-server",
     "payphone-token",
+    "payphone-mobile",
 ]
 
 resolver = "2"
+exclude = ["vendor/quinn-proto"]
+
+[patch.crates-io]
+quinn-proto = { path = "vendor/quinn-proto" }

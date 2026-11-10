@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 payphone-core = { path = "../payphone-core" }
 
-quinn = { version = "0.11.11", features = [
+quinn = { version = "0.11.12", features = [
     "runtime-tokio",
     "rustls-ring"
 ] }

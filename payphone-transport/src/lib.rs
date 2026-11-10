@@ -9,9 +9,7 @@ pub mod tls;
 
 use std::{sync::Arc, time::Duration};
 
-use quinn::{
-    AckFrequencyConfig, MtuDiscoveryConfig, TransportConfig, VarInt, congestion::BbrConfig,
-};
+use quinn::{AckFrequencyConfig, TransportConfig, VarInt, congestion::BbrConfig};
 
 /// QUIC transport for a long-lived VPN, not a short web request.
 ///
@@ -49,42 +47,48 @@ pub fn vpn_transport_config() -> TransportConfig {
 
     //
     // Don't declare persistent congestion after a short DPI drop
-    // or a single PTO burst — that collapses BBR's window and the
+    // or a single PTO burst — that collapses the congestion window and the
     // tunnel feels "dead" for seconds. Default is 3 PTOs.
     //
     transport.persistent_congestion_threshold(6);
 
     //
-    // Wi-Fi reordering looks like loss at threshold 3. One extra
-    // packet before fast-retransmit avoids spurious BBR backoff.
+    // At broadband rates, declaring loss after four packet numbers can
+    // mistake a reordered GSO burst for loss.
+    // Time-based loss detection still handles genuinely missing packets.
     //
-    transport.packet_threshold(4);
+    transport.packet_threshold(2048);
+    transport.time_threshold(2.0);
 
-    let mut mtu_discovery = MtuDiscoveryConfig::default();
-
-    mtu_discovery.interval(Duration::from_secs(20));
-    mtu_discovery.black_hole_cooldown(Duration::from_secs(10));
-    mtu_discovery.upper_bound(1452);
-
-    transport.mtu_discovery_config(Some(mtu_discovery));
+    // The socket adds 10..42 bytes AFTER Quinn has sized/encrypted a packet.
+    // A PMTU probe with short random padding can succeed while later packets
+    // at that size fail with longer padding. Until discovery accounts for the
+    // wrapper's worst-case overhead, retain the conservative QUIC MTU floor.
+    transport.initial_mtu(1200);
+    transport.min_mtu(1200);
+    transport.mtu_discovery_config(None);
 
     let mut ack_frequency = AckFrequencyConfig::default();
 
-    ack_frequency.ack_eliciting_threshold(VarInt::from_u32(2));
-    ack_frequency.max_ack_delay(Some(Duration::from_millis(10)));
+    // Short feedback intervals keep small congestion windows moving and
+    // reduce bursty drain/refill cycles during sustained DATAGRAM traffic.
+    ack_frequency.ack_eliciting_threshold(VarInt::from_u32(1));
+    ack_frequency.max_ack_delay(Some(Duration::from_millis(1)));
 
     transport.ack_frequency_config(Some(ack_frequency));
 
     //
-    // Cubic treats loss as congestion and backs off hard — inner
-    // TCP then also backs off (double control loop). BBR paces to
-    // measured bandwidth and recovers faster on Wi-Fi / DPI drops.
+    // Model-based control for encapsulated IP, with the local BBR startup
+    // window fix. Receiver reordering and loss detection remain bounded.
     //
     transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
 
-    transport.datagram_receive_buffer_size(Some(8 * 1024 * 1024));
+    transport.datagram_receive_buffer_size(Some(16 * 1024 * 1024));
 
-    transport.datagram_send_buffer_size(8 * 1024 * 1024);
+    // At 300 Mbps, 8 MiB covers only ~220ms of queued IP traffic. Leave
+    // headroom for temporary congestion and scheduler pauses without stalling TUN.
+    // This is a per-connection upper bound, allocated only as traffic queues.
+    transport.datagram_send_buffer_size(16 * 1024 * 1024);
 
     //
     // ObfuscatedSocket now speaks GSO/GRO; leave Quinn's offload
@@ -99,6 +103,35 @@ pub fn vpn_transport() -> Arc<TransportConfig> {
     Arc::new(vpn_transport_config())
 }
 
+/// Opt-in operator diagnostics, with no per-packet logging or secret material.
+pub fn log_quic_stats(connection: &quinn::Connection) {
+    if std::env::var("PAYPHONE_QUIC_STATS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let connection = connection.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = connection.closed() => break,
+                _ = tick.tick() => {
+                    let stats = connection.stats();
+                    eprintln!(
+                        "QUIC stats peer={} rtt_us={} min_rtt_us={} cwnd={} sent={} lost={} dup_discard={} data_tx={} data_rx={} free_queue={}",
+                        connection.remote_address(), stats.path.rtt.as_micros(),
+                        stats.path.min_rtt.as_micros(), stats.path.cwnd,
+                        stats.path.sent_packets, stats.path.lost_packets,
+                        stats.path.discarded_duplicate_packets,
+                        stats.frame_tx.datagram, stats.frame_rx.datagram,
+                        connection.datagram_send_buffer_space(),
+                    );
+                }
+            }
+        }
+    });
+}
+
 /// Queue a PAYPHONE datagram without waiting for congestion window.
 ///
 /// Waiting (`send_datagram_wait`) serialized TUN reads behind QUIC
@@ -110,13 +143,8 @@ pub fn send_vpn_datagram(
     connection: &quinn::Connection,
     bytes: bytes::Bytes,
 ) -> Result<bool, quinn::ConnectionError> {
-    if connection
-        .max_datagram_size()
-        .is_some_and(|max| bytes.len() > max)
-    {
-        return Ok(false);
-    }
-
+    // send_datagram checks the current MTU while holding Quinn's connection lock.
+    // A separate max_datagram_size check doubles contention and can race PMTUD.
     match connection.send_datagram(bytes) {
         Ok(()) => Ok(true),
 
@@ -365,5 +393,101 @@ mod tests {
 
         client_connection.close(0u32.into(), b"test finished");
         server_connection.close(0u32.into(), b"test finished");
+    }
+
+    #[tokio::test]
+    async fn duplicated_authenticated_datagram_is_counted_and_delivered_once() {
+        let key = ObfuscationKey::from_passphrase("duplicate-packet-test-secret");
+        let server = create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            key.clone(),
+            false,
+            &ServerTlsConfig::default(),
+        )
+        .unwrap();
+        let server_address = server.local_addr().unwrap();
+        let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let forwarding = tokio::spawn(async move {
+            let mut client_address = None;
+            let mut buffer = vec![0; 65535];
+            loop {
+                let (size, from) = proxy.recv_from(&mut buffer).await.unwrap();
+                if from == server_address {
+                    if let Some(client) = client_address {
+                        proxy.send_to(&buffer[..size], client).await.unwrap();
+                    }
+                } else {
+                    client_address = Some(from);
+                    for _ in 0..2 {
+                        proxy
+                            .send_to(&buffer[..size], server_address)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        });
+        let acceptor = server.clone();
+        let accepted = tokio::spawn(async move { acceptor.accept().await.unwrap().await.unwrap() });
+        let client =
+            create_client_endpoint(key, false, None, None, &ClientTlsConfig::default()).unwrap();
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.connect(proxy_address, SERVER_NAME).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let peer = accepted.await.unwrap();
+        let payload = bytes::Bytes::from_static(b"one authenticated datagram");
+        assert!(super::send_vpn_datagram(&connection, payload.clone()).unwrap());
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(5), peer.read_datagram())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(received, payload);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), peer.read_datagram())
+                .await
+                .is_err()
+        );
+        assert!(peer.stats().path.discarded_duplicate_packets > 0);
+        connection.close(0u32.into(), b"finished");
+        peer.close(0u32.into(), b"finished");
+        forwarding.abort();
+        let _ = forwarding.await;
+    }
+
+    // Quinn <=0.11.11 / quinn-proto <=0.11.17 double-subtracted queued bytes
+    // during eviction. Saturating the datagram queue could abort the process.
+    #[tokio::test(flavor = "current_thread")]
+    async fn outgoing_queue_saturation_does_not_panic() {
+        let key = ObfuscationKey::from_passphrase("saturation-test-secret");
+        let server = create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            key.clone(),
+            false,
+            &ServerTlsConfig::default(),
+        )
+        .unwrap();
+        let acceptor = server.clone();
+        let accepted = tokio::spawn(async move { acceptor.accept().await.unwrap().await.unwrap() });
+        let client =
+            create_client_endpoint(key, false, None, None, &ClientTlsConfig::default()).unwrap();
+        let connection = client
+            .connect(server.local_addr().unwrap(), SERVER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        let peer = accepted.await.unwrap();
+        let bytes = bytes::Bytes::from(vec![0xAB; 1140]);
+        // No await: prevent the connection driver from draining the queue.
+        for _ in 0..100_000 {
+            assert!(super::send_vpn_datagram(&connection, bytes.clone()).unwrap());
+        }
+        connection.close(0u32.into(), b"finished");
+        peer.close(0u32.into(), b"finished");
     }
 }

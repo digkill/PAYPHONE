@@ -95,6 +95,7 @@ class PayphoneVpnService : VpnService() {
                 tlsTrust = trust,
                 saved = saved,
                 protect = { socket -> protect(socket) },
+                protectFd = { fd -> protect(fd) },
             )
             transport = frameTransport
             when (handshake) {

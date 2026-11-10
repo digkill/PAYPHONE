@@ -2,33 +2,27 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
-
-use bytes::Bytes;
 
 use ed25519_dalek::VerifyingKey;
 
 use payphone_auth::{FileRevocationStore, SubscriptionVerifier, VerificationKeyRing};
 
-use payphone_core::{
-    DEFAULT_PORT, DEFAULT_TCP_PORT, Frame, FrameType, PROTOCOL_VERSION, data::Data,
-};
+use payphone_core::{DEFAULT_PORT, DEFAULT_TCP_PORT};
 
 use payphone_transport::{
     identity::load_certificates, obfuscation::ObfuscationKey,
     server::create_server_endpoint_with_runtime, tls::ServerTlsRuntime,
 };
 
-use payphone_tun::{create_server_tun, ipv4_destination};
+use payphone_tun::create_server_tun;
 
 use tokio::{signal, sync::RwLock, time};
 
 mod dns;
+mod forward;
 mod handler;
 mod https;
 mod session;
@@ -100,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tun = create_server_tun()?;
 
-    println!("PAYPHONE server TUN: 10.77.0.1/24");
+    println!("PAYPHONE server TUN: 10.77.0.1/16");
 
     //
     // Без этого пакеты доходят до TUN сервера, но дальше в
@@ -110,17 +104,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Не фатально: если хостовое ядро/iptables не даёт это
     // настроить (например, нет nft/legacy совместимости или
     // недостаточно прав в этом окружении), VPN-сессии и
-    // туннелирование внутри 10.77.0.0/24 всё равно должны
+    // туннелирование внутри 10.77.0.0/16 всё равно должны
     // работать — падать из-за этого не нужно.
     //
     match payphone_tun::routing::enable_server_forwarding(
         payphone_tun::routing::PAYPHONE_SUBNET_CIDR,
     ) {
-        Ok(()) => println!("PAYPHONE server forwarding/NAT enabled for 10.77.0.0/24"),
+        Ok(()) => println!("PAYPHONE server forwarding/NAT enabled for 10.77.0.0/16"),
 
         Err(error) => eprintln!(
             "PAYPHONE server forwarding/NAT setup failed ({error}); \
-             clients will only reach 10.77.0.0/24, not the wider internet"
+             clients will only reach 10.77.0.0/16, not the wider internet"
         ),
     }
 
@@ -153,10 +147,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     keys.insert(1, public_key);
 
-    let verifier = Arc::new(SubscriptionVerifier::new(
-        keys,
-        FileRevocationStore::open(settings.revoke_file),
-    ));
+    let revocations = Arc::new(FileRevocationStore::open(settings.revoke_file));
+    let refresh_store = Arc::clone(&revocations);
+    let mut revocation_worker = tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let store = Arc::clone(&refresh_store);
+            if tokio::task::spawn_blocking(move || store.refresh())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let verifier = Arc::new(SubscriptionVerifier::new(keys, revocations));
 
     //
     // TCP 443 camouflage: browsers get a landing page, PAYPHONE
@@ -225,19 +232,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    //
-    // =========================================================
-    // SERVER -> CLIENT PACKET COUNTER
-    // =========================================================
-    //
-
-    let server_packet_id = Arc::new(AtomicU64::new(1));
-
+    let mut forwarding = tokio::spawn(forward::run(
+        Arc::clone(&tun),
+        Arc::clone(&sessions),
+        Arc::clone(&verifier),
+    ));
     let mut cleanup = time::interval(CLEANUP_INTERVAL);
-
     cleanup.tick().await;
-
-    let mut tun_buffer = vec![0u8; 65535];
 
     println!("PAYPHONE VPN ready");
 
@@ -288,6 +289,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     return;
                                 }
                             };
+
+                        payphone_transport::log_quic_stats(&connection);
 
                         println!(
                             "Client connected: {}",
@@ -355,129 +358,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
 
-            //
-            // =================================================
-            // SERVER TUN -> PAYPHONE CLIENT
-            // =================================================
-            //
-            result =
-                tun.recv(
-                    &mut tun_buffer
-                )
-            => {
-                let size =
-                    result?;
-
-                if size == 0 {
-                    continue;
-                }
-
-                let packet =
-                    &tun_buffer[
-                        ..size
-                    ];
-
-                let Some(destination) =
-                    ipv4_destination(
-                        packet
-                    )
-                else {
-                    //
-                    // IPv6 добавим следующим слоем.
-                    //
-                    continue;
-                };
-
-                //
-                // По destination VPN IP
-                // находим Session.
-                //
-                let route =
-                    {
-                        let manager =
-                            sessions
-                                .read()
-                                .await;
-
-                        manager
-                            .find_by_ipv4(
-                                destination
-                            )
-                            .and_then(
-                                |session| {
-                                    if session.access_error(verifier.as_ref()).is_some() {
-                                        return None;
-                                    }
-                                    if !session
-                                        .rate
-                                        .allow(
-                                            size as u64,
-                                        )
-                                    {
-                                        return None;
-                                    }
-
-                                    session.record_activity();
-                                    Some(
-                                        (
-                                            session.id,
-                                            session
-                                                .link
-                                                .clone(),
-                                        )
-                                    )
-                                }
-                            )
-                    };
-
-                let Some(
-                    (
-                        session_id,
-                        link,
-                    )
-                ) = route
-                else {
-                    continue;
-                };
-
-                let id =
-                    server_packet_id
-                        .fetch_add(
-                            1,
-                            Ordering::Relaxed,
-                        );
-
-                let data =
-                    Data::new(
-                        session_id,
-                        id,
-                        Bytes::copy_from_slice(
-                            packet
-                        ),
-                    );
-
-                let frame =
-                    Frame {
-                        version:
-                            PROTOCOL_VERSION,
-
-                        frame_type:
-                            FrameType::Data,
-
-                        flags: 0,
-
-                        sequence:
-                            id,
-
-                        payload:
-                            data.encode(),
-                    };
-
-                let encoded = frame.encode();
-
-                link.send(encoded).await;
+            result = &mut forwarding => {
+                result??;
+                break;
             }
 
+            result = &mut revocation_worker => {
+                result?;
+                return Err("revocation worker stopped; refusing stale authorization".into());
+            }
 
             //
             // =================================================
@@ -521,6 +410,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    forwarding.abort();
+    revocation_worker.abort();
     endpoint.close(0u32.into(), b"server shutdown");
 
     endpoint.wait_idle().await;

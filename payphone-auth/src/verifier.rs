@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -63,45 +63,75 @@ impl RevocationStore for MemoryRevocationStore {
 // FILE REVOCATION STORE
 // =============================================================
 
-/// One hex token_id per line. Missing file = empty set. Re-reads when mtime changes.
+/// In-memory revocations; call `refresh` from a background worker to reload the file.
 pub struct FileRevocationStore {
     path: PathBuf,
-    cache: Mutex<(Option<SystemTime>, HashSet<[u8; TOKEN_ID_SIZE]>)>,
+    cache: RwLock<RevocationCache>,
+}
+
+#[derive(Default)]
+struct RevocationCache {
+    mtime: Option<SystemTime>,
+    revoked: HashSet<[u8; TOKEN_ID_SIZE]>,
+    unavailable: bool,
 }
 
 impl FileRevocationStore {
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        Self {
+        let store = Self {
             path: path.into(),
-            cache: Mutex::new((None, HashSet::new())),
+            cache: RwLock::new(RevocationCache::default()),
+        };
+        store.refresh();
+        store
+    }
+
+    /// File I/O stays outside the packet path and outside the snapshot lock.
+    pub fn refresh(&self) {
+        let mtime = match fs::metadata(&self.path).and_then(|meta| meta.modified()) {
+            Ok(mtime) => Some(mtime),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Keep known revocations if a previously loaded file disappears.
+                return;
+            }
+            Err(_) => {
+                self.cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .unavailable = true;
+                return;
+            }
+        };
+        {
+            let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+            if cache.mtime == mtime && !cache.unavailable {
+                return;
+            }
+        }
+        let result = fs::read_to_string(&self.path)
+            .map(|text| text.lines().filter_map(parse_token_id_hex).collect());
+        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok(revoked) => {
+                cache.revoked = revoked;
+                cache.mtime = mtime;
+                cache.unavailable = false;
+            }
+            Err(_) => cache.unavailable = true,
         }
     }
 }
 
 impl RevocationStore for FileRevocationStore {
     fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool {
-        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
-        let mtime = match fs::metadata(&self.path).and_then(|meta| meta.modified()) {
-            Ok(mtime) => Some(mtime),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // A removed/unmounted file must not forget known revocations.
-                return cache.1.contains(token_id);
-            }
-            Err(_) => return true,
-        };
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        cache.unavailable || cache.revoked.contains(token_id)
+    }
+}
 
-        if cache.0 != mtime {
-            match fs::read_to_string(&self.path) {
-                Ok(text) => {
-                    cache.1 = text.lines().filter_map(parse_token_id_hex).collect();
-                    cache.0 = mtime;
-                }
-                // Retry on the next check; never authorize using an unreadable store.
-                Err(_) => return true,
-            }
-        }
-
-        cache.1.contains(token_id)
+impl<T: RevocationStore> RevocationStore for std::sync::Arc<T> {
+    fn is_revoked(&self, token_id: &[u8; TOKEN_ID_SIZE]) -> bool {
+        (**self).is_revoked(token_id)
     }
 }
 
@@ -292,15 +322,21 @@ mod file_tests {
         let valid = [43; TOKEN_ID_SIZE];
         assert!(!store.is_revoked(&valid));
         fs::write(&path, token_id_hex(&revoked)).unwrap();
+        // Packet checks use the snapshot until the worker refreshes it.
+        assert!(!store.is_revoked(&revoked));
+        store.refresh();
         assert!(store.is_revoked(&revoked));
         assert!(!store.is_revoked(&valid));
         fs::remove_file(&path).unwrap();
+        store.refresh();
         assert!(store.is_revoked(&revoked));
         // A directory reliably gives a read error even when tests run as root.
         fs::create_dir(&path).unwrap();
+        store.refresh();
         assert!(store.is_revoked(&valid));
         fs::remove_dir(&path).unwrap();
         fs::write(&path, token_id_hex(&revoked)).unwrap();
+        store.refresh();
         assert!(!store.is_revoked(&valid));
         fs::remove_dir_all(dir).unwrap();
     }

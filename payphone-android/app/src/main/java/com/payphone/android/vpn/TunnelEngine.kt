@@ -47,7 +47,7 @@ class TunnelEngine(
         val builder = vpnService.Builder()
             .setSession("PAYPHONE")
             .setMtu(session.mtu.coerceAtMost(ProtocolConstants.PAYPHONE_MTU))
-            .addAddress(bytesToInet(session.assignedIpv4), 24)
+            .addAddress(bytesToInet(session.assignedIpv4), 16)
             .addRoute("0.0.0.0", 1)
             .addRoute("128.0.0.0", 1)
             .addDnsServer("10.77.0.1")

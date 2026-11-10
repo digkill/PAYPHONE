@@ -1,0 +1,4 @@
+module CPayphoneNative {
+    header "payphone_mobile.h"
+    export *
+}

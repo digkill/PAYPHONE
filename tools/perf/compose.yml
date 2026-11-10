@@ -1,0 +1,49 @@
+services:
+  client-net:
+    image: ${LAB_IMAGE}
+    cap_add: [NET_ADMIN]
+    command: [sleep, infinity]
+  peer:
+    image: ${LAB_IMAGE}
+    cap_add: [NET_ADMIN]
+    command: [sh, -c, "ip addr add 198.18.0.2/32 dev lo && exec iperf3 -s -B 198.18.0.2 -J"]
+  server:
+    image: ${LAB_IMAGE}
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    working_dir: /lab
+    volumes:
+      - ${LAB_STATE}/server:/lab
+    environment:
+      TOKIO_WORKER_THREADS: ${LAB_TOKIO_WORKERS:-2}
+      PAYPHONE_QUIC_STATS: "1"
+      PAYPHONE_OBFS_PSK: ${PAYPHONE_OBFS_PSK}
+      PAYPHONE_BIND_ADDR: 0.0.0.0:40404
+      PAYPHONE_TCP_BIND_ADDR: "off"
+      PAYPHONE_AUTH_KEY: /lab/subscription-public.key
+      PAYPHONE_REVOKE_FILE: /lab/revoked.txt
+      PAYPHONE_SESSION_STORE: /lab/sessions.bin
+    command: [payphone-perf-server]
+    depends_on: [peer]
+  client:
+    image: ${LAB_IMAGE}
+    network_mode: service:client-net
+    depends_on: [client-net]
+    cap_add: [NET_ADMIN]
+    devices: [/dev/net/tun:/dev/net/tun]
+    working_dir: /lab
+    volumes:
+      - ${LAB_STATE}/client:/lab
+    environment:
+      TOKIO_WORKER_THREADS: ${LAB_TOKIO_WORKERS:-2}
+      PAYPHONE_QUIC_STATS: "1"
+      PAYPHONE_OBFS_PSK: ${PAYPHONE_OBFS_PSK}
+      PAYPHONE_SERVER_ADDR: server:40404
+      PAYPHONE_SERVER_NAME: localhost
+      PAYPHONE_TLS_CA: pin
+      PAYPHONE_TLS_PIN: /lab/payphone-cert.der
+      PAYPHONE_TOKEN: /lab/subscription.token
+      PAYPHONE_TRANSPORT: quic
+    command: [payphone-client]

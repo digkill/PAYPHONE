@@ -46,15 +46,41 @@ final class VpnManager: ObservableObject {
         if let manager { return manager }
 
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        let existing = managers.first
+        let existing = managers.first {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == Self.extensionBundleId
+        }
         let candidate = existing ?? NETunnelProviderManager()
 
         manager = candidate
-        status = candidate.connection.status
+        apply(status: candidate.connection.status)
         return candidate
     }
 
+    func loadSettings() async throws -> PayphoneSettings? {
+        let manager = try await loadOrCreateManager()
+        guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol,
+              let config = proto.providerConfiguration,
+              let server = config["server"] as? String,
+              let psk = config["psk"] as? String,
+              let token = config["token"] as? Data else { return nil }
+
+        return PayphoneSettings(
+            transport: (config["transport"] as? String).flatMap(TransportKind.init(rawValue:)) ?? .tls,
+            server: server,
+            serverName: config["serverName"] as? String ?? "",
+            psk: psk,
+            tokenBytes: [UInt8](token),
+            pinnedCertBytes: (config["pinnedCert"] as? Data).map { [UInt8]($0) }
+        )
+    }
+
     func connect(settings: PayphoneSettings) async throws {
+        guard !settings.server.isEmpty, settings.psk.count >= 16,
+              settings.tokenBytes?.count == ProtocolConstants.subscriptionTokenSize else {
+            throw NSError(domain: "org.mediarise.payphone", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Open Settings and fill in the server, PSK and subscription token. The saved VPN profile has not been changed."
+            ])
+        }
         let manager = try await loadOrCreateManager()
 
         let proto = NETunnelProviderProtocol()
@@ -62,6 +88,7 @@ final class VpnManager: ObservableObject {
         proto.serverAddress = settings.server
         proto.providerConfiguration = [
             "server": settings.server,
+            "transport": settings.transport.rawValue,
             "psk": settings.psk,
             "serverName": settings.serverName,
             "token": Data(settings.tokenBytes ?? []),
@@ -99,10 +126,10 @@ final class VpnManager: ObservableObject {
     }
 }
 
-/// Persisted, non-secret client settings. Secrets (PSK, token, pinned
-/// cert) live in the Keychain via `KeychainSessionStore`'s sibling
-/// storage — kept out of this struct so it's safe to log/inspect.
+/// In-memory settings restored from this app's saved VPN configuration.
+/// Contains credentials; never log or describe the whole value.
 struct PayphoneSettings: Sendable {
+    var transport: TransportKind = .tls
     var server: String = ""
     var serverName: String = ""
     var psk: String = ""

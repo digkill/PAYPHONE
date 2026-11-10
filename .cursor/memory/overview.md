@@ -6,7 +6,7 @@ IP-пакеты с TUN едут в **QUIC datagrams** (Quinn) под **TLS 1.3**
 
 Репозиторий: [github.com/digkill/PAYPHONE](https://github.com/digkill/PAYPHONE).
 
-Android-клиент (Kotlin, Matrix UI): [`payphone-android/`](../payphone-android/README.md) — TLS на :40443; QUIC через planned `native/`.
+Android-клиент (Kotlin, Matrix UI): [`payphone-android/`](../payphone-android/README.md) — TLS на :40443; QUIC через общий `payphone-mobile` и JNI (`native/build.sh`). Apple использует тот же C ABI через XCFramework (`payphone-apple/build-native.sh`).
 
 ## Зачем так, а не WireGuard
 
@@ -35,7 +35,7 @@ Android-клиент (Kotlin, Matrix UI): [`payphone-android/`](../payphone-andr
 
 | Где | Адрес |
 | --- | --- |
-| VPN-подсеть | `10.77.0.0/24` |
+| VPN-подсеть | `10.77.0.0/16` |
 | Сервер внутри туннеля | `10.77.0.1` |
 | Клиенты | с `10.77.0.2` |
 | Контейнер QUIC | `40404/udp` (`payphone_core::DEFAULT_PORT`) |

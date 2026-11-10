@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use quinn::Connection;
@@ -15,7 +15,9 @@ use payphone_core::{
 };
 use payphone_transport::https_front::TlsFrameWriter;
 use payphone_tun::{
-    PAYPHONE_MTU, PAYPHONE_MTU_MAX, create_client_tun, mtu_from_datagram_budget, set_interface_mtu,
+    PAYPHONE_MTU, PAYPHONE_MTU_MAX, SERVER_TUN_IPV4, SharedTun, create_client_tun,
+    ipv4::{MtuResult, fit_packet},
+    mtu_from_datagram_budget, set_interface_mtu,
 };
 
 use crate::{ActiveSession, matrix};
@@ -50,6 +52,53 @@ impl VpnSink {
             Self::Tls(_) => PAYPHONE_MTU_MAX,
         }
     }
+
+    async fn send_ip(
+        &self,
+        session_id: [u8; 16],
+        packet_id: &mut u64,
+        sequence: &mut u64,
+        packet: &[u8],
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let frame = Data::encode_frame(session_id, *packet_id, *sequence, packet)?;
+        *packet_id = packet_id.wrapping_add(1);
+        *sequence = sequence.wrapping_add(1);
+        self.send(frame).await
+    }
+
+    async fn send_tun_packet(
+        &self,
+        tun: &SharedTun,
+        session_id: [u8; 16],
+        packet_id: &mut u64,
+        sequence: &mut u64,
+        packet: &[u8],
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self
+            .send_ip(session_id, packet_id, sequence, packet)
+            .await?
+        {
+            return Ok(true);
+        }
+        let mtu = self.tun_mtu();
+        if packet.len() <= usize::from(mtu) {
+            return Ok(false);
+        }
+        match fit_packet(packet, mtu, SERVER_TUN_IPV4) {
+            MtuResult::Fragments(parts) => {
+                let mut queued = false;
+                for part in parts {
+                    queued |= self.send_ip(session_id, packet_id, sequence, &part).await?;
+                }
+                Ok(queued)
+            }
+            MtuResult::FragmentationNeeded(reply) => {
+                tun.send(&reply).await?;
+                Ok(false)
+            }
+            MtuResult::Drop => Ok(false),
+        }
+    }
 }
 
 pub enum TunnelExit {
@@ -64,6 +113,16 @@ pub struct QuicShutdown {
     pub connection: Connection,
 }
 
+// A watchdog may retain the Arc after the tunnel exits. The owner must tear
+// routes down immediately, including on a `?` return, before QUIC shutdown.
+struct TunnelRoutes(Arc<payphone_tun::routing::FullTunnelGuard>);
+
+impl Drop for TunnelRoutes {
+    fn drop(&mut self) {
+        self.0.teardown();
+    }
+}
+
 pub async fn run_tunnel(
     active: ActiveSession,
     server_address: std::net::SocketAddr,
@@ -72,6 +131,9 @@ pub async fn run_tunnel(
     quic: Option<QuicShutdown>,
     kill_switch: bool,
 ) -> Result<TunnelExit, Box<dyn std::error::Error>> {
+    if let VpnSink::Quic(connection) = &sink {
+        payphone_transport::log_quic_stats(connection);
+    }
     let mut tun_mtu = PAYPHONE_MTU.min(active.mtu);
 
     let tun = create_client_tun(active.assigned_ipv4, tun_mtu)?;
@@ -92,7 +154,7 @@ pub async fn run_tunnel(
 
             matrix::tunnel_open_banner();
 
-            Some(guard)
+            Some(TunnelRoutes(Arc::new(guard)))
         }
 
         Err(error) if kill_switch => {
@@ -106,7 +168,7 @@ pub async fn run_tunnel(
         Err(error) => {
             eprintln!(
                 "Could not enable full-tunnel routing ({error}); \
-                 only 10.77.0.0/24 will go through the VPN"
+                 only 10.77.0.0/16 will go through the VPN"
             );
 
             None
@@ -129,6 +191,8 @@ pub async fn run_tunnel(
 
     route_watch.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
+    let mut route_job: Option<tokio::task::JoinHandle<()>> = None;
+
     let mut rain_tick = time::interval(Duration::from_millis(50));
 
     rain_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -145,21 +209,8 @@ pub async fn run_tunnel(
                     continue;
                 }
 
-                let data = Data::new(
-                    active.session_id,
-                    packet_id,
-                    Bytes::copy_from_slice(&tun_buffer[..size]),
-                );
-
-                let frame = Frame {
-                    version: PROTOCOL_VERSION,
-                    frame_type: FrameType::Data,
-                    flags: 0,
-                    sequence: frame_sequence,
-                    payload: data.encode(),
-                };
-
-                match sink.send(frame.encode()).await {
+                match sink.send_tun_packet(&tun, active.session_id, &mut packet_id,
+                    &mut frame_sequence, &tun_buffer[..size]).await {
                     Ok(true) => flow.pulse('▸'),
 
                     Ok(false) => {}
@@ -175,9 +226,6 @@ pub async fn run_tunnel(
                     }
                 }
 
-                packet_id = packet_id.wrapping_add(1);
-
-                frame_sequence = frame_sequence.wrapping_add(1);
             }
 
             result = incoming.recv() => {
@@ -340,7 +388,12 @@ pub async fn run_tunnel(
 
             _ = route_watch.tick() => {
                 if let Some(ref guard) = full_tunnel {
-                    guard.ensure_tunnel_routes();
+                    if route_job.as_ref().is_none_or(|job| job.is_finished()) {
+                        let guard = Arc::clone(&guard.0);
+                        route_job = Some(tokio::task::spawn_blocking(move || {
+                            guard.ensure_tunnel_routes();
+                        }));
+                    }
                 }
 
                 let next_mtu = sink.tun_mtu();

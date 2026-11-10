@@ -1,8 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.parcelize")
 }
+
+val nodeProfile = Properties().apply {
+    val profileFile = rootProject.file("../runtime/node-103.74.92.168/android-build-profile.properties")
+    if (profileFile.isFile) profileFile.inputStream().use(::load)
+}
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 android {
     namespace = "com.payphone.android"
@@ -12,8 +21,13 @@ android {
         applicationId = "com.payphone.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.0-node2"
+
+        buildConfigField("String", "DEFAULT_SERVER", "\"103.74.92.168:8443\"")
+        buildConfigField("String", "DEFAULT_SERVER_NAME", "\"103.74.92.168\"")
+        buildConfigField("String", "DEFAULT_PSK", buildConfigString(nodeProfile.getProperty("psk", "")))
+        buildConfigField("String", "DEFAULT_TOKEN_BASE64", buildConfigString(nodeProfile.getProperty("tokenBase64", "")))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

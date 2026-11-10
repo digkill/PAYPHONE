@@ -1,6 +1,6 @@
 # Архитектура
 
-Cargo workspace, resolver `"2"`, семь крейтов. Зависимости направлены **внутрь**: бинарники → transport/tun/auth → core. `payphone-core` **не** знает про Ed25519, QUIC, TUN.
+Cargo workspace, resolver `"2"`, восемь крейтов. Зависимости направлены **внутрь**: бинарники → transport/tun/auth → core. `payphone-core` **не** знает про Ed25519, QUIC, TUN.
 
 ```text
 payphone-client ──┐
@@ -18,6 +18,7 @@ payphone-token ────── payphone-auth ────── (нет core)
 | `payphone-transport` | Quinn endpoints, TLS identity/ACME, UDP obfuscation, HTTPS front, REALITY | нет |
 | `payphone-tun` | Async TUN, IPv4 helpers, full-tunnel routing / NAT / kill-switch | нет |
 | `payphone-server` | Auth, сессии, DNS stub, TUN↔wire | `payphone-server` |
+| `payphone-mobile` | Общий мобильный QUIC C ABI; Android JNI / Apple XCFramework | staticlib / cdylib |
 | `payphone-client` | Handshake, TUN forward, keepalive, resume file, Matrix TUI | `payphone-client` |
 
 ## Поток данных (UDP / QUIC)
@@ -56,9 +57,17 @@ VPN возит IP. IP уже теряет пакеты. Надёжный stream 
 | `payphone-server/src/session.rs` | `SessionManager`, persist, limits |
 | `payphone-client/src/main.rs` | Клиентский цикл, ping jitter |
 | `payphone-client/src/tunnel.rs` | TUN ↔ кадры |
-| `payphone-transport/src/lib.rs` | Quinn `TransportConfig` (BBR, idle 180s) |
+| `payphone-transport/src/lib.rs` | Quinn `TransportConfig` (BBR со startup/sampling fixes, idle 180s) |
 | `payphone-tun/src/routing.rs` | Full-tunnel, NAT, IPv6 blackhole |
 
 ## Рантайм
 
 Tokio multi-thread. Сервер: concurrent клиенты; cleanup сессий каждые 5s. Клиент: TUN, datagrams, ping, SIGINT. Resume-файл клиента — `.payphone-session` (ChaCha20-Poly1305). Store сервера — `payphone-sessions.bin` / `PAYPHONE_SESSION_STORE`.
+
+## Нагрузка
+
+Серверный TUN→wire работает в отдельной задаче `forward.rs`, независимо от accept/cleanup. `SessionManager.by_ipv4` — индекс для O(1) маршрутизации; обновлять при любом удалении/создании/восстановлении. Пул `/16`: 65 533 адреса, это предел адресации, не доказанная ёмкость сервера. Benchmark транспорта: `cargo run --release -p payphone-transport --example bench_datagrams -- 1 100 5`; исключает TUN/NAT/auth и мобильные bindings.
+
+Локальная transport dependency: vendor/quinn-proto (не workspace member), patch crates.io0.11.19 с2048-PN replay window. Исходник/лицензии и delta задокументированы в PATCHES.md; собственных крейтов по-прежнему8.
+
+2026-11-09 connection recovery: iOS App ContentView used fresh @State settings and never restored NETunnelProviderProtocol.providerConfiguration. Build4 restores server/transport/SNI/PSK/binary token/pin from this app’s saved profile, filters manager by own extension bundle, updates status on load, allows disconnect even with empty UI settings, validates required fields before overwriting saved profile. Secrets are already in existing NE preferences; no new secret store/baked config. Removed incorrect comment claiming settings secrets are stored separately in Keychain. Signed build4 installed on connected iPhone; runtime/ios/20261109-build4/Payphone-1.0-build4.ipa. For recovery, bundled entire tunnel extension from known installed build2, changed only bundle version/re-signed: PayphoneTunnel.debug.dylib SHA byte-identical to build2, recorded in tunnel-engine-sha256.txt. Plain xcodebuild would relink current native artifacts; this recovery IPA is a post-build assembly retaining the old engine. Server stays BBR firstfix191645, fresh QUIC+TLS auth/rekey/DNS/NAT/resume probes pass; physical user connection still needs verification. Mac currently VPSUS, own CLI not running, no noninteractive sudo. Do not claim all devices restored based on these probes.

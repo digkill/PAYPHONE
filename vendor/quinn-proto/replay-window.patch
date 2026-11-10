@@ -1,0 +1,513 @@
+--- a/src/connection/spaces.rs
++++ b/src/connection/spaces.rs
+@@ -1,5 +1,4 @@
+ use std::{
+-    cmp,
+     collections::{BTreeMap, VecDeque},
+     mem,
+     ops::{Bound, Index, IndexMut, Range},
+@@ -11,9 +10,9 @@
+ 
+ use super::assembler::Assembler;
+ use crate::{
+-    Dir, Duration, Instant, SocketAddr, StreamId, TransportError, VarInt, cid_queue::CidQueue,
+-    connection::StreamsState, crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet,
+-    shared::IssuedCid,
++    cid_queue::CidQueue, connection::StreamsState, crypto::Keys, frame, packet::SpaceId,
++    range_set::ArrayRangeSet, shared::IssuedCid, Dir, Duration, Instant, SocketAddr, StreamId,
++    TransportError, VarInt,
+ };
+ 
+ pub(super) struct PacketSpace {
+@@ -456,128 +455,85 @@
+     }
+ }
+ 
+-/// RFC4303-style sliding window packet number deduplicator.
++/// Fixed replay window indexed by authenticated absolute packet numbers.
+ ///
+-/// A contiguous bitfield, where each bit corresponds to a packet number and the rightmost bit is
+-/// always set. A set bit represents a packet that has been successfully authenticated. Bits left of
+-/// the window are assumed to be set.
+-///
+-/// ```text
+-/// ...xxxxxxxxx 1 0
+-///     ^        ^ ^
+-/// window highest next
+-/// ```
++/// PAYPHONE: 129 packet numbers covered only a few milliseconds at broadband
++/// rates and discarded delayed, valid datagrams. Keep 2048 numbers without
++/// shifting the whole bitmap on each packet. Older numbers remain rejected.
+ pub(super) struct Dedup {
+-    window: Window,
++    window: [u64; 32],
+     /// Lowest packet number higher than all yet authenticated.
+     next: u64,
+ }
+ 
+-/// Inner bitfield type.
+-///
+-/// Because QUIC never reuses packet numbers, this only needs to be large enough to deal with
+-/// packets that are reordered but still delivered in a timely manner.
+-type Window = u128;
+-
+-/// Number of packets tracked by `Dedup`.
+-const WINDOW_SIZE: u64 = 1 + mem::size_of::<Window>() as u64 * 8;
++const WINDOW_SIZE: u64 = 2048;
+ 
+ impl Dedup {
+-    /// Construct an empty window positioned at the start.
+     pub(super) fn new() -> Self {
+-        Self { window: 0, next: 0 }
+-    }
+-
+-    /// Highest packet number authenticated.
++        Self {
++            window: [0; 32],
++            next: 0,
++        }
++    }
++
+     fn highest(&self) -> u64 {
+         self.next - 1
+     }
+ 
+-    /// Record a newly authenticated packet number.
+-    ///
+-    /// Returns whether the packet might be a duplicate.
+     pub(super) fn insert(&mut self, packet: u64) -> bool {
+         if let Some(diff) = packet.checked_sub(self.next) {
+-            // Right of window
+-            self.window = ((self.window << 1) | 1)
+-                .checked_shl(cmp::min(diff, u64::from(u32::MAX)) as u32)
+-                .unwrap_or(0);
++            if diff >= WINDOW_SIZE - 1 {
++                self.window.fill(0);
++            } else {
++                // Invalidate recycled slots a word at a time; usually one bit.
++                let mut first = self.next;
++                while first <= packet {
++                    let offset = first % 64;
++                    let count = (64 - offset).min(packet - first + 1);
++                    let mask = Self::mask(offset, count);
++                    self.window[((first % WINDOW_SIZE) / 64) as usize] &= !mask;
++                    first += count;
++                }
++            }
+             self.next = packet + 1;
+-            false
+-        } else if self.highest() - packet < WINDOW_SIZE {
+-            // Within window
+-            if let Some(bit) = (self.highest() - packet).checked_sub(1) {
+-                // < highest
+-                let mask = 1 << bit;
+-                let duplicate = self.window & mask != 0;
+-                self.window |= mask;
+-                duplicate
+-            } else {
+-                // == highest
+-                true
+-            }
++        } else if self.highest() - packet >= WINDOW_SIZE {
++            return true;
++        }
++        let word = &mut self.window[((packet % WINDOW_SIZE) / 64) as usize];
++        let mask = 1 << (packet % 64);
++        let duplicate = *word & mask != 0;
++        *word |= mask;
++        duplicate
++    }
++
++    fn mask(offset: u64, count: u64) -> u64 {
++        if count == 64 {
++            u64::MAX
+         } else {
+-            // Left of window
+-            true
+-        }
+-    }
+-
+-    /// Returns the packet number of the smallest packet missing between the provided interval
+-    ///
+-    /// If there are no missing packets, returns `None`
++            ((1u64 << count) - 1) << offset
++        }
++    }
++
++    /// Find the first missing number strictly between received boundaries.
++    /// Numbers outside the retained window are conservatively treated as seen.
+     fn smallest_missing_in_interval(&self, lower_bound: u64, upper_bound: u64) -> Option<u64> {
+         debug_assert!(lower_bound <= upper_bound);
+         debug_assert!(upper_bound <= self.highest());
+-        const BITFIELD_SIZE: u64 = (mem::size_of::<Window>() * 8) as u64;
+-
+-        // Since we already know the packets at the boundaries have been received, we only need to
+-        // check those in between them (this removes the necessity of extra logic to deal with the
+-        // highest packet, which is stored outside the bitfield)
+-        let lower_bound = lower_bound + 1;
+-        let upper_bound = upper_bound.saturating_sub(1);
+-
+-        // Note: the offsets are counted from the right
+-        // The highest packet is not included in the bitfield, so we subtract 1 to account for that
+-        let start_offset = (self.highest() - upper_bound).max(1) - 1;
+-        if start_offset >= BITFIELD_SIZE {
+-            // The start offset is outside of the window. All packets outside of the window are
+-            // considered to be received.
+-            return None;
+-        }
+-
+-        let end_offset_exclusive = self.highest().saturating_sub(lower_bound);
+-
+-        // The range is clamped at the edge of the window, because any earlier packets are
+-        // considered to be received
+-        let range_len = end_offset_exclusive
+-            .saturating_sub(start_offset)
+-            .min(BITFIELD_SIZE);
+-        if range_len == 0 {
+-            return None;
+-        }
+-
+-        // Ensure the shift is within bounds (we already know start_offset < BITFIELD_SIZE,
+-        // because of the early return)
+-        let mask = if range_len == BITFIELD_SIZE {
+-            u128::MAX
+-        } else {
+-            ((1u128 << range_len) - 1) << start_offset
+-        };
+-        let gaps = !self.window & mask;
+-
+-        let smallest_missing_offset = 128 - gaps.leading_zeros() as u64;
+-        let smallest_missing_packet = self.highest() - smallest_missing_offset;
+-
+-        if smallest_missing_packet <= upper_bound {
+-            Some(smallest_missing_packet)
+-        } else {
+-            None
+-        }
+-    }
+-
+-    /// Returns true if there are any missing packets between the provided interval
+-    ///
+-    /// The provided packet numbers must have been received before calling this function
++        let mut first = (lower_bound + 1).max(self.next.saturating_sub(WINDOW_SIZE));
++        let last = upper_bound.saturating_sub(1);
++        while first <= last {
++            let offset = first % 64;
++            let count = (64 - offset).min(last - first + 1);
++            let word = self.window[((first % WINDOW_SIZE) / 64) as usize];
++            let missing = !word & Self::mask(offset, count);
++            if missing != 0 {
++                return Some(first - offset + u64::from(missing.trailing_zeros()));
++            }
++            first += count;
++        }
++        None
++    }
++
+     fn missing_in_interval(&self, lower_bound: u64, upper_bound: u64) -> bool {
+         self.smallest_missing_in_interval(lower_bound, upper_bound)
+             .is_some()
+@@ -930,34 +886,67 @@
+     #[test]
+     fn sanity() {
+         let mut dedup = Dedup::new();
++        let mut seen = std::collections::BTreeSet::new();
++        for packet in [0, 0, 1, 2, 4, 7, 4, 3, 6, 5] {
++            assert_eq!(dedup.insert(packet), !seen.insert(packet));
++            assert_eq!(dedup.next, seen.last().copied().unwrap() + 1);
++        }
++    }
++
++    #[test]
++    fn delayed_authenticated_packets_beyond_129_are_not_discarded() {
++        let mut dedup = Dedup::new();
+         assert!(!dedup.insert(0));
+-        assert_eq!(dedup.next, 1);
+-        assert_eq!(dedup.window, 0b1);
++        assert!(!dedup.insert(1500));
++        assert!(!dedup.insert(1));
++        assert!(dedup.insert(1));
++        assert!(!dedup.insert(WINDOW_SIZE + 1));
++        assert!(dedup.insert(1));
++    }
++
++    #[test]
++    fn jump_keeps_the_oldest_retained_bit_and_rejects_expired_replays() {
++        let mut dedup = Dedup::new();
++        assert!(!dedup.insert(0));
++        assert!(!dedup.insert(WINDOW_SIZE - 1));
+         assert!(dedup.insert(0));
+-        assert_eq!(dedup.next, 1);
+-        assert_eq!(dedup.window, 0b1);
++        assert!(!dedup.insert(WINDOW_SIZE));
++        assert!(dedup.insert(0));
+         assert!(!dedup.insert(1));
+-        assert_eq!(dedup.next, 2);
+-        assert_eq!(dedup.window, 0b11);
+-        assert!(!dedup.insert(2));
+-        assert_eq!(dedup.next, 3);
+-        assert_eq!(dedup.window, 0b111);
+-        assert!(!dedup.insert(4));
+-        assert_eq!(dedup.next, 5);
+-        assert_eq!(dedup.window, 0b11110);
+-        assert!(!dedup.insert(7));
+-        assert_eq!(dedup.next, 8);
+-        assert_eq!(dedup.window, 0b1111_0100);
+-        assert!(dedup.insert(4));
+-        assert!(!dedup.insert(3));
+-        assert_eq!(dedup.next, 8);
+-        assert_eq!(dedup.window, 0b1111_1100);
+-        assert!(!dedup.insert(6));
+-        assert_eq!(dedup.next, 8);
+-        assert_eq!(dedup.window, 0b1111_1101);
+-        assert!(!dedup.insert(5));
+-        assert_eq!(dedup.next, 8);
+-        assert_eq!(dedup.window, 0b1111_1111);
++        assert!(dedup.insert(1));
++    }
++
++    #[test]
++    fn replay_window_matches_set_oracle_across_wraps_and_gaps() {
++        use std::collections::BTreeSet;
++        let mut dedup = Dedup::new();
++        let mut seen = BTreeSet::new();
++        let mut highest = 0u64;
++        let mut random = 0x123456789abcdefu64;
++        for step in 0..10000 {
++            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
++            let packet = if step % 3 == 0 {
++                highest + 1 + random % 193
++            } else {
++                highest.saturating_sub(random % (2 * WINDOW_SIZE))
++            };
++            let old = highest.saturating_sub(packet) >= WINDOW_SIZE;
++            let duplicate = old || seen.contains(&packet);
++            assert_eq!(
++                dedup.insert(packet),
++                duplicate,
++                "packet {packet}, high {highest}"
++            );
++            highest = highest.max(packet);
++            if !old {
++                seen.insert(packet);
++            }
++            seen.retain(|number| highest - number < WINDOW_SIZE);
++            let lower = highest.saturating_sub(257);
++            let min = (lower + 1).max((highest + 1).saturating_sub(WINDOW_SIZE));
++            let expected = (min..highest).find(|number| !seen.contains(number));
++            assert_eq!(dedup.smallest_missing_in_interval(lower, highest), expected);
++        }
+     }
+ 
+     #[test]
+@@ -974,13 +963,12 @@
+     #[test]
+     fn jump() {
+         let mut dedup = Dedup::new();
+-        dedup.insert(2 * WINDOW_SIZE);
++        assert!(!dedup.insert(2 * WINDOW_SIZE));
+         assert!(dedup.insert(WINDOW_SIZE));
+         assert_eq!(dedup.next, 2 * WINDOW_SIZE + 1);
+-        assert_eq!(dedup.window, 0);
+         assert!(!dedup.insert(WINDOW_SIZE + 1));
+-        assert_eq!(dedup.next, 2 * WINDOW_SIZE + 1);
+-        assert_eq!(dedup.window, 1 << (WINDOW_SIZE - 2));
++        assert!(dedup.insert(WINDOW_SIZE + 1));
++        assert!(dedup.insert(2 * WINDOW_SIZE));
+     }
+ 
+     #[test]
+@@ -1008,16 +996,16 @@
+     fn dedup_outside_of_window_has_missing() {
+         let mut dedup = Dedup::new();
+ 
+-        for i in 0..140 {
++        for i in 0..WINDOW_SIZE + 11 {
+             dedup.insert(i);
+         }
+ 
+         // 0 and 4 are outside of the window
+         assert!(!dedup.missing_in_interval(0, 4));
+-        dedup.insert(160);
++        dedup.insert(WINDOW_SIZE + 31);
+         assert!(!dedup.missing_in_interval(0, 4));
+-        assert!(!dedup.missing_in_interval(0, 140));
+-        assert!(dedup.missing_in_interval(0, 160));
++        assert!(!dedup.missing_in_interval(0, WINDOW_SIZE + 11));
++        assert!(dedup.missing_in_interval(0, WINDOW_SIZE + 31));
+     }
+ 
+     #[test]
+@@ -1038,15 +1026,18 @@
+         dedup.insert(2);
+         assert_eq!(dedup.smallest_missing_in_interval(1, 7), Some(3));
+ 
+-        dedup.insert(170);
+-        dedup.insert(172);
+-        dedup.insert(300);
+-        assert_eq!(dedup.smallest_missing_in_interval(170, 172), None);
+-
+-        dedup.insert(500);
+-        assert_eq!(dedup.smallest_missing_in_interval(0, 500), Some(372));
+-        assert_eq!(dedup.smallest_missing_in_interval(0, 373), Some(372));
+-        assert_eq!(dedup.smallest_missing_in_interval(0, 372), None);
++        let first = WINDOW_SIZE + 41;
++        dedup.insert(first);
++        dedup.insert(first + 2);
++        dedup.insert(first + 2 + WINDOW_SIZE);
++        assert_eq!(dedup.smallest_missing_in_interval(first, first + 2), None);
++
++        let high = first + 3 * WINDOW_SIZE;
++        dedup.insert(high);
++        let low = high + 1 - WINDOW_SIZE;
++        assert_eq!(dedup.smallest_missing_in_interval(0, high), Some(low));
++        assert_eq!(dedup.smallest_missing_in_interval(0, low + 1), Some(low));
++        assert_eq!(dedup.smallest_missing_in_interval(0, low), None);
+     }
+ 
+     #[test]
+--- a/src/connection/mod.rs
++++ b/src/connection/mod.rs
+@@ -2339,6 +2339,7 @@
+ 
+                 let is_duplicate = |n| self.spaces[packet.header.space()].dedup.insert(n);
+                 if number.is_some_and(is_duplicate) {
++                    self.stats.path.discarded_duplicate_packets += 1;
+                     debug!("discarding possible duplicate packet");
+                     return;
+                 } else if self.state.is_handshake() && packet.header.is_short() {
+--- a/src/connection/stats.rs
++++ b/src/connection/stats.rs
+@@ -144,6 +144,9 @@
+     pub congestion_events: u64,
+     /// The amount of packets lost on this path
+     pub lost_packets: u64,
++    /// Authenticated packets rejected as duplicates or older than the replay window.
++    /// PAYPHONE local diagnostic; this is not necessarily network packet loss.
++    pub discarded_duplicate_packets: u64,
+     /// The amount of bytes lost on this path
+     pub lost_bytes: u64,
+     /// The amount of packets sent on this path
+--- a/src/congestion/bbr/mod.rs
++++ b/src/congestion/bbr/mod.rs
+@@ -324,7 +324,7 @@
+         // time.
+         if self.is_at_full_bandwidth {
+             self.cwnd = target_window.min(self.cwnd + bytes_acked);
+-        } else if (self.cwnd_gain < target_window as f32) || (self.acked_bytes < self.init_cwnd) {
++        } else if (self.cwnd < target_window) || (self.acked_bytes < self.init_cwnd) {
+             // If the connection is not yet out of startup phase, do not decrease
+             // the window.
+             self.cwnd += bytes_acked;
+@@ -649,3 +649,55 @@
+ 
+ const PROBE_RTT_BASED_ON_BDP: bool = true;
+ const DRAIN_TO_TARGET: bool = true;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn app_limited_from_birth_keeps_ack_aggregation_bounded() {
++        let start = Instant::now();
++        let rtt = RttEstimator::new(Duration::from_millis(50));
++        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
++        bbr.min_rtt = rtt.min();
++        for round in 0..100 {
++            let base = start + Duration::from_millis(round * 80);
++            for packet in 0..24 {
++                bbr.on_sent(
++                    base + Duration::from_millis(packet),
++                    1200,
++                    round * 24 + packet,
++                );
++            }
++            for packet in 0..24 {
++                let sent = base + Duration::from_millis(packet);
++                let acked = sent + Duration::from_millis(50);
++                bbr.on_ack(acked, sent, 1200, true, &rtt);
++                bbr.on_end_acks(acked, (23 - packet) * 1200, true, Some(round * 24 + packet));
++            }
++        }
++        assert!(bbr.max_bandwidth.get_estimate() > 0);
++        assert!(bbr.cwnd <= 2 * bbr.init_cwnd, "cwnd={}", bbr.cwnd);
++    }
++
++    #[test]
++    fn app_limited_startup_stops_growing_at_the_modeled_window() {
++        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
++        bbr.acked_bytes = bbr.init_cwnd;
++        let target = bbr.get_target_cwnd(bbr.cwnd_gain);
++        bbr.cwnd = target;
++        for _ in 0..100 {
++            bbr.calculate_cwnd(1200, 0);
++        }
++        assert_eq!(bbr.cwnd, target);
++
++        // Startup grows gradually towards its model and never shrinks a
++        // previously larger window, including after an idle/application gap.
++        bbr.cwnd = target / 2;
++        bbr.calculate_cwnd(1200, 0);
++        assert_eq!(bbr.cwnd, target / 2 + 1200);
++        bbr.cwnd = target + 2400;
++        bbr.calculate_cwnd(1200, 0);
++        assert_eq!(bbr.cwnd, target + 2400);
++    }
++}
+--- a/src/congestion/bbr/bw_estimation.rs
++++ b/src/congestion/bbr/bw_estimation.rs
+@@ -62,7 +62,9 @@
+         };
+ 
+         let bandwidth = send_rate.min(ack_rate);
+-        if !app_limited && self.max_filter.get() < bandwidth {
++        // A limited application can reveal a higher delivery rate. Lower
++        // non-limited samples must also advance the filter's expiry window.
++        if bandwidth > 0 && (!app_limited || self.max_filter.get() < bandwidth) {
+             self.max_filter.update_max(round, bandwidth);
+         }
+     }
+@@ -99,3 +101,42 @@
+         )
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn limited_samples_can_seed_but_cannot_lower_the_estimate() {
++        let start = Instant::now();
++        let mut estimate = BandwidthEstimation::default();
++        estimate.on_sent(start, 1200);
++        estimate.on_sent(start + Duration::from_millis(1), 1200);
++        estimate.on_ack(start + Duration::from_millis(50), start, 1200, 1, true);
++        estimate.on_ack(start + Duration::from_millis(51), start, 1200, 1, true);
++        assert_eq!(estimate.get_estimate(), 1_200_000);
++        estimate.on_ack(start + Duration::from_millis(61), start, 1200, 100, true);
++        assert_eq!(estimate.get_estimate(), 1_200_000);
++    }
++
++    #[test]
++    fn non_limited_samples_expire_an_old_peak() {
++        let start = Instant::now();
++        let mut estimate = BandwidthEstimation::default();
++        estimate.on_sent(start, 1200);
++        estimate.on_sent(start + Duration::from_millis(1), 1200);
++        estimate.on_ack(start + Duration::from_millis(50), start, 1200, 1, false);
++        estimate.on_ack(start + Duration::from_millis(51), start, 1200, 1, false);
++        assert_eq!(estimate.get_estimate(), 1_200_000);
++        for round in 2..=30 {
++            estimate.on_ack(
++                start + Duration::from_millis(51 + (round - 1) * 10),
++                start,
++                1200,
++                round,
++                false,
++            );
++        }
++        assert_eq!(estimate.get_estimate(), 120_000);
++    }
++}

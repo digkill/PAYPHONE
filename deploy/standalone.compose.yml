@@ -1,0 +1,58 @@
+# Run from /opt/payphone with: docker compose --env-file server.env up -d
+# For broadband QUIC, apply 90-payphone-udp-buffers.conf on the Docker host
+# before creating this service; docker-proxy uses host UDP buffer defaults.
+services:
+  payphone-server:
+    image: ${PAYPHONE_IMAGE:?Set the tested server image}
+    pull_policy: never
+    container_name: payphone-server
+    ports:
+      - "${PAYPHONE_HOST_PORT:-8443}:40404/udp"
+      - "${PAYPHONE_HOST_PORT:-8443}:40443/tcp"
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    devices: [/dev/net/tun:/dev/net/tun]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /run:size=1m,mode=755
+    volumes:
+      - ./certs:/app/dev-certs
+      - ./state:/app/state
+    environment:
+      TOKIO_WORKER_THREADS: "2"
+      PAYPHONE_BIND_ADDR: 0.0.0.0:40404
+      PAYPHONE_TCP_BIND_ADDR: 0.0.0.0:40443
+      PAYPHONE_OBFS_PSK: ${PAYPHONE_OBFS_PSK:?Set a random PSK}
+      PAYPHONE_TLS_SAN: ${PAYPHONE_TLS_SAN:?Set the public server IP or DNS name}
+      PAYPHONE_AUTH_KEY: /app/auth-keys/subscription-public.key
+      PAYPHONE_SESSION_STORE: /app/state/sessions.bin
+      PAYPHONE_REVOKE_FILE: /app/state/revoked-token-ids.txt
+      PAYPHONE_DEV_MODE: "false"
+      PAYPHONE_QUIC_STATS: "${PAYPHONE_QUIC_STATS:-0}"
+      PAYPHONE_REALITY: "off"
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+    restart: unless-stopped
+    pids_limit: 256
+    mem_limit: 1536m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [CMD-SHELL, "test -e /sys/class/net/payphone0 && grep -q ':9DD4 ' /proc/net/udp && grep -q ':9DFB ' /proc/net/tcp"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      traefik.enable: "false"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

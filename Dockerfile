@@ -20,8 +20,10 @@ COPY payphone-tun ./payphone-tun
 COPY payphone-client ./payphone-client
 COPY payphone-server ./payphone-server
 COPY payphone-token ./payphone-token
+COPY payphone-mobile ./payphone-mobile
+COPY vendor/quinn-proto ./vendor/quinn-proto
 
-RUN cargo build --release \
+RUN cargo build --locked --release \
     -p payphone-server \
     -p payphone-client \
     -p payphone-token

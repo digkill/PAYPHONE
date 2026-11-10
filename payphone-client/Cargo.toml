@@ -17,7 +17,7 @@ payphone-tun = {
 }
 
 bytes = "1"
-quinn = "0.11.11"
+quinn = "0.11.12"
 
 tokio = {
     version = "1",

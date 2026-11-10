@@ -37,3 +37,5 @@
 ## Скоуп правок
 
 Меняй только то, что просит задача. Не рефактори соседние крейты. Не коммить `.env`, ключи, `*.der`, `.DS_Store`.
+
+При изменении локального quinn-proto дополнительно: `CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path vendor/quinn-proto/Cargo.toml --lib`. Это исключённый из workspace upstream crate, его версия0.11.19 и лицензии сохраняются; собственные крейты остаются0.2.0. Проверять, что vendor source diff ограничен документированным патчем, и повторять TUN/NAT lab.

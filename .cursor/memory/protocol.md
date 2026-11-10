@@ -14,7 +14,7 @@
 
 - `HEADER_SIZE = 16`
 - `MAX_PAYLOAD_SIZE = 64 KiB`
-- Sequence: сервер принимает кадр, если он не дальше чем **1024** позади максимума (`SEQUENCE_REORDER_WINDOW`). Точные дубликаты внутри окна проходят; целостность уже у QUIC/TLS.
+- Sequence: сервер принимает кадр, если он не дальше чем **65 536** позади максимума (`SEQUENCE_REORDER_WINDOW`). Точные дубликаты внутри этого coarse-окна проходят; целостность/replay уже у QUIC/TLS. Ширина покрывает2048 QUIC PN с несколькими DATA frames на UDP; старые1024 могли снова отбрасывать данные, которые принял расширенный transport replay window.
 
 Неизвестный `FrameType` или version ≠ 1 → ошибка decode, кадр отбросить.
 
@@ -100,6 +100,8 @@ Idle сессии: **300s** (`SESSION_TIMEOUT`). Входящий и исход�
 
 ## DATA path
 
-Сервер отвергает не-IPv4, неверные IHL/total length; IPv4 source клиента должен совпадать с assigned address; иначе дроп. Bandwidth: token-bucket по `max_mbps` (0 = без лимита). Device limit: при превышении вытесняется самая старая сессия этого `client_id` (`CloseReason::Replaced`).
+Сервер отвергает не-IPv4, неверные IHL/total length; IPv4 source клиента должен совпадать с assigned address; иначе дроп. Bandwidth: независимые upload/download token-bucket по `max_mbps` на сессию (0 = без лимита). Device limit: при превышении вытесняется самая старая сессия этого `client_id` (`CloseReason::Replaced`).
 
 Неизвестный resume или неверный nonce получает `AccessDeniedDude(InvalidToken)`: клиент может начать новый handshake. Отзыв/истечение подписки остаются окончательным отказом.
+
+`Data::encode_frame(session_id, packet_id, sequence, payload)` кодирует Frame+DATA в одну allocation и одну копию IP. Байты равны прежним Data::encode → Frame::encode (version 1, flags 0); wire и limits не меняются. Использовать на Rust TUN hot path вместо трёх промежуточных буферов.

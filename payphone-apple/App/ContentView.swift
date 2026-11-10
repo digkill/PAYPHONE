@@ -45,7 +45,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(isConnected ? .red : .green)
-                    .disabled(isBusy || settings.server.isEmpty)
+                    .disabled(isBusy || (!isConnected && settings.server.isEmpty))
                     .padding(.horizontal, 32)
 
                     if let errorMessage {
@@ -73,7 +73,13 @@ struct ContentView: View {
             }
         }
         .task {
-            _ = try? await vpn.loadOrCreateManager()
+            do {
+                if let saved = try await vpn.loadSettings(), settings.server.isEmpty {
+                    settings = saved
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 

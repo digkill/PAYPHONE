@@ -27,10 +27,6 @@ pub fn create_client_endpoint(
 ) -> Result<Endpoint, Box<dyn std::error::Error>> {
     let roots = client_root_store(tls)?;
 
-    let mut client_config = ClientConfig::with_root_certificates(Arc::new(roots))?;
-
-    client_config.transport_config(crate::vpn_transport());
-
     //
     // :0 означает:
     //
@@ -62,6 +58,20 @@ pub fn create_client_endpoint(
 
     #[cfg(not(target_os = "macos"))]
     let _ = bind_iface;
+
+    create_client_endpoint_on_socket(socket, obfuscation_key, dev_mode, roots)
+}
+
+/// Reuse an OS socket so mobile VPN providers can protect it before connecting.
+pub fn create_client_endpoint_on_socket(
+    socket: std::net::UdpSocket,
+    obfuscation_key: ObfuscationKey,
+    dev_mode: bool,
+    roots: rustls::RootCertStore,
+) -> Result<Endpoint, Box<dyn std::error::Error>> {
+    let mut client_config = ClientConfig::with_root_certificates(Arc::new(roots))?;
+    client_config.transport_config(crate::vpn_transport());
+    crate::tune_udp_buffers(&socket);
 
     let runtime = default_runtime()
         .ok_or_else(|| "no async runtime found for PAYPHONE QUIC endpoint".to_string())?;

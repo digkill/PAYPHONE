@@ -9,6 +9,7 @@ import kotlin.random.Random
  * Not encryption — QUIC/TLS already protect confidentiality.
  */
 class ObfuscationKey(passphrase: String) {
+    internal fun derivedBytes(): ByteArray = key.copyOf()
     private val key: ByteArray = MessageDigest.getInstance("SHA-256")
         .digest(passphrase.toByteArray(Charsets.UTF_8))
 

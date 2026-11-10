@@ -2,12 +2,13 @@ use std::{io, net::Ipv4Addr, sync::Arc};
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+pub mod ipv4;
 pub mod routing;
 
 /// IPv4 PAYPHONE network.
 ///
-/// 10.77.0.0/24
-pub const PAYPHONE_PREFIX: u8 = 24;
+/// 10.77.0.0/16
+pub const PAYPHONE_PREFIX: u8 = 16;
 
 /// MTU туннеля.
 ///
@@ -36,13 +37,12 @@ pub const PAYPHONE_PREFIX: u8 = 24;
 /// гарантированного бюджета quinn без всякой зависимости от того,
 /// успела ли отработать MTU discovery.
 ///
-/// После path-MTU клиент поднимает TUN выше, до `PAYPHONE_MTU_MAX`.
+/// Клиент уточняет MTU по фактическому datagram budget. QUIC PMTUD
+/// выключен, пока не учитывает внешний overhead обфускации.
 pub const PAYPHONE_MTU: u16 = 1100;
 
-/// Ceiling once QUIC path-MTU (or the TLS stream) has more budget
-/// than the RFC 9000 floor. 1400 stays under a typical 1500 Ethernet
-/// path after outer UDP/TLS headers; IPv6's 1280 minimum is still
-/// above the safe QUIC floor, which is why in-tunnel IPv6 waits.
+/// Ceiling for server TUN and the TLS stream; QUIC clients use the
+/// smaller actual DATAGRAM budget. Inner IPv6 is not supported.
 pub const PAYPHONE_MTU_MAX: u16 = 1450;
 
 /// Frame header + Data header, subtracted from Quinn's datagram
@@ -81,7 +81,10 @@ pub fn set_interface_mtu(device: &AsyncDevice, mtu: u16) {
     // crash the client with TooLarge as soon as real browsing
     // started.
     //
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    let _ = device.set_mtu(mtu);
+
+    #[cfg(all(unix, not(target_os = "linux")))]
     if let Ok(name) = device.name() {
         let _ = std::process::Command::new("ifconfig")
             .args([&name, "mtu", &mtu.to_string()])
@@ -130,7 +133,10 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
     // На Linux имя можем выбрать сами.
     //
     #[cfg(target_os = "linux")]
-    let builder = builder.name("payphone0");
+    // 500 packets cover only ~14ms at 300 Mbps. The Linux lab observed
+    // scheduling bursts exceeding 100ms; bound the backlog at ~8 MiB
+    // for 1 KiB packets, without allocating it ahead of traffic.
+    let builder = builder.name("payphone0").tx_queue_len(8192);
 
     //
     // Windows: Wintun adapter name. Place `wintun.dll` next to the exe
@@ -154,23 +160,21 @@ pub fn create_client_tun(assigned_ipv4: [u8; 4], mtu: u16) -> io::Result<SharedT
 ///
 /// Адрес:
 ///
-/// 10.77.0.1/24
+/// 10.77.0.1/16
 pub fn create_server_tun() -> io::Result<SharedTun> {
     let builder = DeviceBuilder::new()
         .ipv4(SERVER_TUN_IPV4, PAYPHONE_PREFIX, None::<Ipv4Addr>)
         .mtu(PAYPHONE_MTU_MAX);
 
     #[cfg(target_os = "linux")]
-    let builder = builder.name("payphone0");
+    let builder = builder.name("payphone0").tx_queue_len(8192);
 
     let device = builder.build_async()?;
 
     //
     // Shared TUN: MSS clamp follows this interface. Keep it at
-    // the ceiling so a client that grew its own UTUN after PMTUD
-    // can actually receive large TCP segments. Datagrams that
-    // still don't fit a given QUIC path are dropped in
-    // `send_vpn_datagram` (TooLarge), not by the TUN MTU.
+    // the ceiling for TLS peers. forward::run handles oversized IP
+    // packets per QUIC peer with fragmentation or ICMP feedback.
     //
     set_interface_mtu(&device, PAYPHONE_MTU_MAX);
 

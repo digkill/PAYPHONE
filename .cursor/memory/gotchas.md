@@ -4,7 +4,7 @@
 
 ## MTU / Quinn
 
-- QUIC гарантирует ~1200 UDP до discovery; у Quinn накладные ≈46 байт → бюджет датаграммы ~1154.
+- QUIC packet MTU сейчас фиксирован на 1200, PMTUD выключен: обёртка добавляет ещё 10–42 bytes после sizing Quinn. Проба с коротким pad не доказывает, что длинный pad влезет. У Quinn остаётся собственный overhead; бюджет DATAGRAM брать из max_datagram_size, не из 1200 напрямую.
 - PAYPHONE header 40 байт. TUN **1100** влезает (1140). TUN **1280** → кадр 1320 → `TooLarge` на первом «толстом» пакете.
 - Регрессионный тест: `max_size_frame_sends_immediately_after_handshake` в `payphone-transport`.
 
@@ -20,7 +20,7 @@
 
 - `networksetup` пересобирает таблицу → пропадает host-route к VPS → `/1` заглатывает сервер → QUIC в свой utun → смерть сессии.
 - Маршрут `-ifscope en0` не виден unscoped lookup Quinn. Нужен обычный `/32` через LAN gateway.
-- Watchdog `sleep` **внутри** `select` сбрасывался каждым TUN-пакетом и **никогда** не чинил обход под трафиком. Отдельный interval ~400ms.
+- Watchdog `sleep` **внутри** `select` сбрасывался каждым TUN-пакетом и **никогда** не чинил обход под трафиком. Отдельный interval ~400ms. OS-команды выполнять в spawn_blocking (не блокировать TUN), максимум одна задача; teardown синхронизировать с ней и вызвать до закрытия QUIC, даже если worker ещё держит Arc.
 - `IP_BOUND_IF` на UDP, чтобы пакеты физически шли в Wi-Fi.
 
 ## SIGINT
@@ -51,6 +51,18 @@ Tokio перехватывает Ctrl+C. Если сначала `wait_idle()`, 
 
 ## Прочее
 
-- Sequence window 1024: не делать `seq <= last` reject — datagrams реально reorder.
+- Sequence window 65536: не делать `seq <= last` reject — datagrams реально reorder.
 - DoH браузера обходит DNS stub, но едет по туннелю — это ок.
 - Resume после рестарта сервера: файл store должен быть на volume, не в эфемерном контейнере.
+
+## Очередь Linux TUN под нагрузкой
+
+При 300 Mbps ~1KiB packets дефолтные 500 packets дают ~14ms запаса. В Docker наблюдались большие всплески и TUN TX drops при нулевых UDP socket drops. TX queue теперь 8192 (ограничена, ~220ms для таких пакетов); проверять ip -s link и loaded RTT, не только средний iperf. Результаты, включая неудачные конфигурации, — docs/performance.md.
+
+## Внутренние потери QUIC на широком канале
+
+Upstream quinn-proto129-PN replay window отвергал поздние валидные пакеты после нескольких миллисекунд перестановки при300Mbps. В проекте локальный2048-PN ring patch (vendor/quinn-proto/PATCHES.md), BBR с исправлениями startup guard и bandwidth sampling, packet_threshold2048, time_threshold2.0 и PP sequence tolerance65536. Не возвращать registry dependency без эквивалентного исправления и нагрузочной проверки. Одних UDP socket/TUN drop counters недостаточно — внутренние отбрасывания могут не отражаться в них.
+
+## Docker UDP proxy на реальном VPS
+
+Ошибка входящей скорости может быть вне QUIC socket: docker-proxy host socket default212KB переполнялся (ss -uanmp skmem d923), контейнерный /proc/net/snmp при этом errors0. Увеличение receive/send очередей Quinn не меняет эти sockets. На103.74.92.168 применён deploy/90-payphone-udp-buffers.conf на HOST: defaults4MiB/max16MiB, затем пересоздан только PAYPHONE. Не рестартовать Docker daemon/чужие сервисы. Счётчик потерь cumulative; сравнивать до/после и конкретный socket.

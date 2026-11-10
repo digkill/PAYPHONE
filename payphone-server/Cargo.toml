@@ -21,7 +21,7 @@ payphone-tun = {
 }
 
 bytes = "1"
-quinn = "0.11.11"
+quinn = "0.11.12"
 rand = "0.9"
 
 ed25519-dalek = {

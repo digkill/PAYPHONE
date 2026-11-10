@@ -46,6 +46,29 @@ pub struct Data {
 }
 
 impl Data {
+    /// Собирает DATA и внешний Frame в одном буфере без промежуточных копий IP.
+    pub fn encode_frame(
+        session_id: [u8; SESSION_ID_SIZE],
+        packet_id: u64,
+        sequence: u64,
+        payload: &[u8],
+    ) -> Result<Bytes, FrameError> {
+        let payload_len = DATA_HEADER_SIZE + payload.len();
+        if payload.len() > MAX_DATA_PAYLOAD_SIZE || payload_len > crate::MAX_PAYLOAD_SIZE {
+            return Err(FrameError::DataPayloadTooLarge);
+        }
+        let mut buffer = BytesMut::with_capacity(crate::HEADER_SIZE + payload_len);
+        buffer.put_u8(crate::PROTOCOL_VERSION);
+        buffer.put_u8(crate::FrameType::Data as u8);
+        buffer.put_u16(0);
+        buffer.put_u32(payload_len as u32);
+        buffer.put_u64(sequence);
+        buffer.extend_from_slice(&session_id);
+        buffer.put_u64(packet_id);
+        buffer.extend_from_slice(payload);
+        Ok(buffer.freeze())
+    }
+
     /// Создаёт новый DATA.
     pub fn new(session_id: [u8; SESSION_ID_SIZE], packet_id: u64, payload: Bytes) -> Self {
         Self {
@@ -120,6 +143,34 @@ impl Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_frame_matches_existing_wire_encoding() {
+        for size in [0, 1, 1100, 1450, crate::MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE] {
+            let payload = vec![0xAB; size];
+            let reference = crate::Frame {
+                version: crate::PROTOCOL_VERSION,
+                frame_type: crate::FrameType::Data,
+                flags: 0,
+                sequence: u64::MAX,
+                payload: Data::new([0x42; 16], 123, Bytes::copy_from_slice(&payload)).encode(),
+            }
+            .encode();
+            let encoded = Data::encode_frame([0x42; 16], 123, u64::MAX, &payload).unwrap();
+            assert_eq!(encoded, reference);
+            let decoded = Data::decode(crate::Frame::decode(encoded).unwrap().payload).unwrap();
+            assert_eq!(decoded.payload.as_ref(), payload);
+        }
+        assert!(
+            Data::encode_frame(
+                [0; 16],
+                1,
+                1,
+                &vec![0; crate::MAX_PAYLOAD_SIZE - DATA_HEADER_SIZE + 1]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn data_roundtrip() {

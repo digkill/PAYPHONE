@@ -3,7 +3,7 @@
 Experimental Android client for the [PAYPHONE](../README.md) VPN protocol — Matrix hacker aesthetic, green-on-black, vertical digital rain, payphone glyphs.
 
 **Protocol:** PAYPHONE/1 (same frames as `payphone-core`: `WhatsUpDude`, `AllGoodDude`, `Data`, …).  
-**Transport today:** TLS on TCP **40443** (full tunnel via `VpnService`). QUIC/UDP is UI-ready; needs [`native/`](native/README.md) Rust bridge.
+**Transports:** TLS on TCP **40443**, or obfuscated QUIC/UDP through the shared Rust module. Build [`native/`](native/README.md) before packaging QUIC. Both use `VpnService` for the full tunnel.
 
 ## Look & feel
 
@@ -56,6 +56,13 @@ adb reverse tcp:40443 tcp:40443
 
 Then set server to `127.0.0.1:40443` in the app.
 
+The personal node 103.74.92.168 APK defaults to QUIC on
+`103.74.92.168:8443` and ships its pinned DER certificate, PSK, and
+subscription token. It opens preconfigured; tap **Jack in** and accept
+Android's VPN permission prompt on first use. This node APK contains usable
+credentials and must only be distributed privately. Never commit the generated
+profile or resulting APK to the repository.
+
 ## Project layout
 
 ```text
@@ -67,7 +74,7 @@ payphone-android/
     vpn/          # VpnService + TUN ↔ frames
     ui/           # Compose Matrix rain + connect screen
     data/         # Encrypted session + DataStore settings
-  native/         # Planned Quinn JNI (QUIC)
+  native/         # Quinn JNI build script and C shim
 ```
 
 ## Build
@@ -77,6 +84,13 @@ cd payphone-android
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-26.jdk/Contents/Home
 ./gradlew assembleDebug
 # or open in Android Studio
+```
+
+The reproducible arm64 build also needs the Android NDK installed:
+
+```bash
+../payphone-android/native/build.sh aarch64-linux-android
+./gradlew assembleDebug
 ```
 
 Unit tests (JVM, protocol roundtrip):
@@ -89,7 +103,7 @@ Unit tests (JVM, protocol roundtrip):
 
 When connected, the app installs:
 
-- TUN address from `AllGoodDude` (`10.77.0.x/24`)
+- TUN address from `AllGoodDude` (`10.77.x.y/16`)
 - Routes `0.0.0.0/1` and `128.0.0.0/1`
 - DNS `10.77.0.1` (server stub)
 - MTU from server (starts at 1100)
@@ -104,7 +118,7 @@ Server socket uses `VpnService.protect()` so the VPN app reaches the host outsid
 
 ## Roadmap
 
-- [ ] Rust JNI: QUIC + UDP obfuscation (`native/`)
+- [x] Rust JNI: QUIC + UDP obfuscation (`native/`); physical-device validation required
 - [ ] SAF import for `subscription.token` file
 - [ ] Optional kill-switch
 - [ ] IPv6 blackhole routes on Android 13+ APIs

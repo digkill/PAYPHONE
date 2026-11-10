@@ -36,11 +36,11 @@ Clock skew verifier: **300s** (`CLOCK_SKEW_SECONDS`).
 | `pro` | 2 | 5 | 500 |
 | `unlimited` | 3 | 255 | 0 (без потолка) |
 
-`255` устройств = `UNLIMITED_DEVICES` в `session.rs`. При превышении лимита вытесняется самая старая сессия этого `client_id`. Mbps: token-bucket по размеру inner IP; 0 = не режем.
+`255` устройств = `UNLIMITED_DEVICES` в `session.rs`. При превышении лимита вытесняется самая старая сессия этого `client_id`. Mbps: два независимых token-bucket по размеру inner IP на сессию (upload/download); каждый ограничен max_mbps. 0 = не режем. Лимит устройств по client_id; Mbps не суммируется между устройствами.
 
 ## Revoke
 
-Файл: одна hex `token_id` (32 hex chars) на строку. Default `auth-keys/revoked-token-ids.txt` / `PAYPHONE_REVOKE_FILE`. `FileRevocationStore` перечитывает по **mtime** на каждой проверке — рестарт сервера не нужен. До первого появления файла отсутствие означает пустой набор. Если файл исчез после загрузки, известные отзывы сохраняются в памяти; ошибки чтения запрещают доступ и повторяются при следующей проверке.
+Файл: одна hex `token_id` (32 hex chars) на строку. Default `auth-keys/revoked-token-ids.txt` / `PAYPHONE_REVOKE_FILE`. `FileRevocationStore::open` загружает начальный снимок; сервер вызывает `refresh()` в `spawn_blocking` раз в секунду. `is_revoked` читает снимок без файловых syscall; задержка отзыва — интервал обновления плюс время чтения/планирования. До первого появления файла отсутствие означает пустой набор. Если файл исчез после загрузки, известные отзывы сохраняются в памяти; ошибки чтения запрещают доступ до успешного фонового обновления. Не вызывать `refresh()` на DATA-пути.
 
 ```bash
 cargo run -p payphone-token -- revoke subscription.token

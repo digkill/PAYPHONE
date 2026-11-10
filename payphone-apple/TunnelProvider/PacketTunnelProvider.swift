@@ -68,7 +68,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let (frameTransport, handshake) = try await client.connect(
             server: config.server,
             tlsTrust: trust,
-            saved: saved
+            saved: saved,
+            transport: config.transport
         )
 
         transport = frameTransport
@@ -76,7 +77,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         switch handshake {
         case .connected(let session, let resumeToken):
             sessionStore.save(SavedSession(sessionId: session.sessionId, resumeToken: resumeToken))
-            try await applyTunnelSettings(session: session, serverHost: host)
+            try await applyTunnelSettings(session: session, serverHost: host,
+                remoteIPv4: (frameTransport as? QuicFrameChannel)?.remoteIPv4)
 
             // Capture the Logger value itself (a Sendable struct), not
             // `self` (an NEPacketTunnelProvider, not Sendable) — this
@@ -111,13 +113,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// server, so the TLS connection carrying the tunnel doesn't try to
     /// route itself through itself (the same problem the macOS CLI
     /// client's FullTunnelGuard solves with a host `/32` route).
-    private func applyTunnelSettings(session: ActiveSession, serverHost: String) async throws {
+    private func applyTunnelSettings(session: ActiveSession, serverHost: String, remoteIPv4: String?) async throws {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: serverHost)
 
-        let ipv4 = NEIPv4Settings(addresses: [session.assignedIpv4String], subnetMasks: ["255.255.255.0"])
+        let ipv4 = NEIPv4Settings(addresses: [session.assignedIpv4String], subnetMasks: ["255.255.0.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()]
 
-        if let serverIP = try? resolvedIPv4(serverHost) {
+        if let serverIP = remoteIPv4 ?? (try? resolvedIPv4(serverHost)) {
             ipv4.excludedRoutes = [NEIPv4Route(destinationAddress: serverIP, subnetMask: "255.255.255.255")]
         }
 
@@ -149,6 +151,7 @@ struct TunnelConfig {
     let serverName: String
     let token: [UInt8]
     let pinnedCertDER: [UInt8]?
+    let transport: TransportKind
 
     init?(protocolConfiguration: NEVPNProtocol, options: [String: NSObject]?) {
         guard let proto = protocolConfiguration as? NETunnelProviderProtocol,
@@ -160,6 +163,7 @@ struct TunnelConfig {
             return nil
         }
 
+        self.transport = (config["transport"] as? String).flatMap { TransportKind(rawValue: $0) } ?? .tls
         self.server = server
         self.psk = psk
         self.serverName = config["serverName"] as? String ?? ""

@@ -33,8 +33,9 @@ pub const SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 pub const REKEY_AFTER: Duration = Duration::from_secs(3600);
 
 /// Drop frames this far behind the highest sequence seen.
-/// Datagrams reorder; `seq <= last` would kill honest DATA.
-pub const SEQUENCE_REORDER_WINDOW: u64 = 1024;
+/// A QUIC packet can bundle multiple PAYPHONE frames. Cover the transport's
+/// 2048-packet replay horizon without rejecting its accepted, reordered IP.
+pub const SEQUENCE_REORDER_WINDOW: u64 = 65_536;
 
 pub fn accept_sequence(last: &AtomicU64, incoming: u64) -> bool {
     let seen = last.fetch_max(incoming, Ordering::Relaxed);
@@ -60,18 +61,31 @@ pub enum ClientLink {
 }
 
 impl ClientLink {
-    pub async fn send(&self, bytes: Bytes) {
+    pub async fn send(&self, bytes: Bytes) -> bool {
         match self {
             Self::Quic(connection) => {
-                let _ = payphone_transport::send_vpn_datagram(connection, bytes);
+                payphone_transport::send_vpn_datagram(connection, bytes).unwrap_or(false)
             }
 
             Self::Stream { tx, .. } => {
                 // IP loss is preferable to stalling every client behind this stream.
-                let _ = tx.try_send(bytes);
+                tx.try_send(bytes).is_ok()
             }
 
-            Self::Detached => {}
+            Self::Detached => false,
+        }
+    }
+
+    pub fn ip_mtu(&self) -> u16 {
+        match self {
+            Self::Quic(connection) => connection
+                .max_datagram_size()
+                .unwrap_or(0)
+                .saturating_sub(payphone_tun::PAYPHONE_FRAME_OVERHEAD as usize)
+                .min(payphone_tun::PAYPHONE_MTU_MAX as usize)
+                as u16,
+            Self::Stream { .. } => payphone_tun::PAYPHONE_MTU_MAX,
+            Self::Detached => 0,
         }
     }
 
@@ -247,7 +261,9 @@ pub struct Session {
 
     pub max_mbps: u32,
 
-    pub rate: RateLimit,
+    pub upload_rate: RateLimit,
+
+    pub download_rate: RateLimit,
 }
 
 impl Session {
@@ -296,6 +312,10 @@ pub enum CreateSessionError {
 pub struct SessionManager {
     sessions: HashMap<SessionId, Session>,
 
+    by_ipv4: HashMap<[u8; 4], SessionId>,
+
+    next_host: u16,
+
     store_path: Option<PathBuf>,
 }
 
@@ -303,6 +323,8 @@ impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            by_ipv4: HashMap::new(),
+            next_host: 2,
             store_path: None,
         }
     }
@@ -382,9 +404,11 @@ impl SessionManager {
             plan: subscription.plan,
             device_limit: subscription.device_limit,
             max_mbps: subscription.max_mbps,
-            rate: RateLimit::new(subscription.max_mbps),
+            upload_rate: RateLimit::new(subscription.max_mbps),
+            download_rate: RateLimit::new(subscription.max_mbps),
         };
 
+        self.by_ipv4.insert(session.ipv4, session.id);
         self.sessions.insert(session.id, session);
 
         self.persist();
@@ -546,7 +570,7 @@ impl SessionManager {
     }
 
     pub fn remove(&mut self, id: &SessionId) -> Option<Session> {
-        let session = self.sessions.remove(id);
+        let session = self.take_session(id);
 
         if session.is_some() {
             self.persist();
@@ -584,9 +608,10 @@ impl SessionManager {
     }
 
     pub fn find_by_ipv4(&self, ipv4: [u8; 4]) -> Option<&Session> {
+        let id = self.by_ipv4.get(&ipv4)?;
         self.sessions
-            .values()
-            .find(|session| session.ipv4 == ipv4 && session.link.is_live())
+            .get(id)
+            .filter(|session| session.link.is_live())
     }
 
     pub fn remove_invalid<R: RevocationStore>(
@@ -604,7 +629,7 @@ impl SessionManager {
             .collect();
         let removed: Vec<_> = invalid
             .into_iter()
-            .filter_map(|(id, reason)| self.sessions.remove(&id).map(|session| (session, reason)))
+            .filter_map(|(id, reason)| self.take_session(&id).map(|session| (session, reason)))
             .collect();
         if !removed.is_empty() {
             self.persist();
@@ -617,9 +642,17 @@ impl SessionManager {
 
         let before = self.sessions.len();
 
-        self.sessions.retain(|_id, session| {
-            now.saturating_duration_since(session.last_activity()) < SESSION_TIMEOUT
-        });
+        let expired: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|session| {
+                now.saturating_duration_since(session.last_activity()) >= SESSION_TIMEOUT
+            })
+            .map(|session| session.id)
+            .collect();
+        for id in expired {
+            self.take_session(&id);
+        }
 
         let removed = before - self.sessions.len();
 
@@ -685,7 +718,7 @@ impl SessionManager {
 
         let id = detached.or(live)?.1;
 
-        let session = self.sessions.remove(&id)?;
+        let session = self.take_session(&id)?;
 
         Some(KickedSession {
             id: session.id,
@@ -693,16 +726,26 @@ impl SessionManager {
         })
     }
 
-    fn allocate_ipv4(&self) -> Option<[u8; 4]> {
-        let mut used = [false; 256];
+    fn take_session(&mut self, id: &SessionId) -> Option<Session> {
+        let session = self.sessions.remove(id)?;
+        self.by_ipv4.remove(&session.ipv4);
+        // Reuse freed addresses without scanning the entire pool.
+        self.next_host = u16::from_be_bytes([session.ipv4[2], session.ipv4[3]]);
+        Some(session)
+    }
 
-        for session in self.sessions.values() {
-            used[session.ipv4[3] as usize] = true;
+    fn allocate_ipv4(&mut self) -> Option<[u8; 4]> {
+        // /16: network .0.0, gateway .0.1, broadcast .255.255 are reserved.
+        for _ in 2..=u16::MAX - 1 {
+            let host = self.next_host;
+            self.next_host = if host == u16::MAX - 1 { 2 } else { host + 1 };
+            let [hi, lo] = host.to_be_bytes();
+            let address = [10, 77, hi, lo];
+            if !self.by_ipv4.contains_key(&address) {
+                return Some(address);
+            }
         }
-
-        (2u8..=254)
-            .find(|&host| !used[host as usize])
-            .map(|host| [10, 77, 0, host])
+        None
     }
 
     fn persist(&self) {
@@ -793,6 +836,7 @@ impl SessionManager {
         }
 
         let mut sessions = HashMap::with_capacity(count);
+        let mut by_ipv4 = HashMap::with_capacity(count);
 
         let now = Instant::now();
 
@@ -804,6 +848,14 @@ impl SessionManager {
             let mut ipv4 = [0u8; 4];
 
             buffer.copy_to_slice(&mut ipv4);
+            let host = u16::from_be_bytes([ipv4[2], ipv4[3]]);
+            if ipv4[..2] != [10, 77]
+                || !(2..u16::MAX).contains(&host)
+                || sessions.contains_key(&id)
+                || by_ipv4.insert(ipv4, id).is_some()
+            {
+                return Err("duplicate or invalid session address/id");
+            }
 
             let capabilities = buffer.get_u32();
 
@@ -863,13 +915,16 @@ impl SessionManager {
                     plan,
                     device_limit,
                     max_mbps,
-                    rate: RateLimit::new(max_mbps),
+                    upload_rate: RateLimit::new(max_mbps),
+                    download_rate: RateLimit::new(max_mbps),
                 },
             );
         }
 
         Ok(Self {
             sessions,
+            by_ipv4,
+            next_host: 2,
             store_path: None,
         })
     }
@@ -972,6 +1027,75 @@ mod tests {
         assert_eq!(first.assigned_ipv4, [10, 77, 0, 2]);
 
         assert_eq!(second.assigned_ipv4, [10, 77, 0, 3]);
+    }
+
+    #[test]
+    fn pool_crosses_old_subnet_and_rebuilds_index_after_restore() {
+        let mut manager = SessionManager::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut last = None;
+        for _ in 0..1000 {
+            let (session, _) = manager
+                .create_session(
+                    dummy_addr(),
+                    ClientLink::Stream {
+                        id: 1,
+                        tx: tx.clone(),
+                    },
+                    1,
+                    [0; 32],
+                    1,
+                    1100,
+                    &claims(1, UNLIMITED_DEVICES, 0),
+                )
+                .unwrap();
+            assert_eq!(
+                manager.find_by_ipv4(session.assigned_ipv4).unwrap().id,
+                session.session_id
+            );
+            last = Some(session);
+        }
+        let last = last.unwrap();
+        assert_ne!(last.assigned_ipv4[2], 0);
+        let mut restored = SessionManager::decode_store(&manager.encode_store()).unwrap();
+        assert_eq!(restored.by_ipv4.len(), 1000);
+        assert!(restored.find_by_ipv4(last.assigned_ipv4).is_none());
+        restored
+            .resume_session(
+                &last.session_id,
+                &last.server_nonce,
+                dummy_addr(),
+                ClientLink::Stream { id: 2, tx },
+                2,
+                1100,
+            )
+            .unwrap();
+        assert!(restored.find_by_ipv4(last.assigned_ipv4).is_some());
+        restored.remove(&last.session_id);
+        assert!(!restored.by_ipv4.contains_key(&last.assigned_ipv4));
+        assert_eq!(restored.allocate_ipv4(), Some(last.assigned_ipv4));
+    }
+
+    #[test]
+    fn duplex_buckets_are_independent() {
+        let mut manager = SessionManager::new();
+        let (created, _) = manager
+            .create_session(
+                dummy_addr(),
+                ClientLink::Detached,
+                1,
+                [0; 32],
+                1,
+                1100,
+                &claims(1, 1, 1),
+            )
+            .unwrap();
+        let session = manager.get(&created.session_id).unwrap();
+        for rate in [&session.upload_rate, &session.download_rate] {
+            rate.last_refill_ms.store(u64::MAX, Ordering::Relaxed);
+            assert!(rate.allow(125_000));
+            assert!(!rate.allow(1));
+        }
     }
 
     #[test]
@@ -1135,12 +1259,15 @@ mod tests {
     fn accept_sequence_allows_reorder_but_drops_old_replays() {
         let last = AtomicU64::new(0);
 
-        assert!(accept_sequence(&last, 2000));
-        assert_eq!(last.load(Ordering::Relaxed), 2000);
-        assert!(accept_sequence(&last, 1990));
-        assert_eq!(last.load(Ordering::Relaxed), 2000);
-        assert!(accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW + 1));
-        assert!(!accept_sequence(&last, 2000 - SEQUENCE_REORDER_WINDOW));
+        let high = 2 * SEQUENCE_REORDER_WINDOW;
+        assert!(accept_sequence(&last, high));
+        assert_eq!(last.load(Ordering::Relaxed), high);
+        assert!(accept_sequence(&last, high - 10));
+        assert_eq!(last.load(Ordering::Relaxed), high);
+        assert!(accept_sequence(&last, high - 2048));
+        assert!(accept_sequence(&last, high - 36_864));
+        assert!(accept_sequence(&last, high - SEQUENCE_REORDER_WINDOW + 1));
+        assert!(!accept_sequence(&last, high - SEQUENCE_REORDER_WINDOW));
     }
     #[test]
     fn rekey_acknowledges_only_a_pending_rotation() {
@@ -1189,17 +1316,89 @@ mod tests {
     async fn full_tls_queue_drops_without_blocking_other_clients() {
         let (tx, mut rx) = mpsc::channel(1);
         let link = ClientLink::Stream { id: 1, tx };
-        link.send(Bytes::from_static(b"first")).await;
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            link.send(Bytes::from_static(b"dropped")),
-        )
-        .await
-        .unwrap();
+        assert!(link.send(Bytes::from_static(b"first")).await);
+        assert!(
+            !tokio::time::timeout(
+                Duration::from_millis(100),
+                link.send(Bytes::from_static(b"dropped")),
+            )
+            .await
+            .unwrap()
+        );
         assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"first"));
         assert!(rx.try_recv().is_err());
         drop(rx);
         assert!(!link.is_live());
+    }
+
+    #[tokio::test]
+    async fn oversized_quic_data_can_be_fragmented_after_failed_enqueue() {
+        use payphone_core::{Frame, data::Data};
+        use payphone_transport::{
+            client::create_client_endpoint,
+            identity::{ClientTlsConfig, SERVER_NAME, ServerTlsConfig},
+            obfuscation::ObfuscationKey,
+            server::create_server_endpoint,
+        };
+        use payphone_tun::ipv4::{MtuResult, fit_packet};
+
+        let key = ObfuscationKey::from_passphrase("fragment-fallback-regression");
+        let server = create_server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            key.clone(),
+            false,
+            &ServerTlsConfig::default(),
+        )
+        .unwrap();
+        let acceptor = server.clone();
+        let task = tokio::spawn(async move { acceptor.accept().await.unwrap().await.unwrap() });
+        let client =
+            create_client_endpoint(key, false, None, None, &ClientTlsConfig::default()).unwrap();
+        let connection = client
+            .connect(server.local_addr().unwrap(), SERVER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        let peer = task.await.unwrap();
+        let link = ClientLink::Quic(connection.clone());
+        let mut packet = vec![0xAB; 1450];
+        packet[..20].fill(0);
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&1450u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 1]);
+        packet[16..20].copy_from_slice(&[10, 77, 0, 2]);
+        assert!(
+            !link
+                .send(Data::encode_frame([1; 16], 1, 1, &packet).unwrap())
+                .await
+        );
+        let MtuResult::Fragments(fragments) =
+            fit_packet(&packet, link.ip_mtu(), Ipv4Addr::new(10, 77, 0, 1))
+        else {
+            panic!()
+        };
+        let mut reassembled = Vec::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            assert!(
+                link.send(
+                    Data::encode_frame([1; 16], index as u64 + 2, index as u64 + 2, fragment)
+                        .unwrap()
+                )
+                .await
+            );
+            let bytes = tokio::time::timeout(Duration::from_secs(2), peer.read_datagram())
+                .await
+                .unwrap()
+                .unwrap();
+            let data = Data::decode(Frame::decode(bytes).unwrap().payload).unwrap();
+            assert_eq!(data.payload.as_ref(), fragment);
+            reassembled.extend_from_slice(&data.payload[20..]);
+        }
+        assert_eq!(reassembled, packet[20..]);
+        connection.close(0u32.into(), b"done");
+        peer.close(0u32.into(), b"done");
     }
 
     #[test]

@@ -149,6 +149,10 @@ pub fn validate_passphrase(passphrase: &str) -> Result<(), &'static str> {
 pub struct ObfuscationKey([u8; KEY_LEN]);
 
 impl ObfuscationKey {
+    /// Already-derived SHA256(passphrase), shared with the mobile bindings.
+    pub fn from_derived_key(key: [u8; 32]) -> Self {
+        Self(key)
+    }
     //
     // Пароль -> фиксированный 32-byte key через SHA256.
     //
@@ -199,46 +203,56 @@ impl ObfuscationKey {
     /// caller. GSO needs every segment in a batch to grow by the same amount
     /// so UDP_SEGMENT still sees equal-sized chunks.
     pub fn obfuscate_padded(&self, payload: &[u8], pad_len: usize) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.obfuscate_padded_into(payload, pad_len, &mut out)?;
+        Ok(out)
+    }
+
+    /// Append one wire datagram, allowing a socket to reuse its transmit buffer.
+    pub(crate) fn obfuscate_padded_into(
+        &self,
+        payload: &[u8],
+        pad_len: usize,
+        out: &mut Vec<u8>,
+    ) -> io::Result<()> {
         let pad_len = pad_len.min(MAX_PADDING);
-
-        let mut salt = [0u8; SALT_LEN];
-
-        fill_random(&mut salt);
-
-        let stream = self.keystream(&salt);
-
         let payload_len: u16 = payload
             .len()
             .try_into()
             .map_err(|_| io::Error::other("payload too large to obfuscate (> 65535 bytes)"))?;
 
-        let mut padding = vec![0u8; pad_len];
-
-        fill_random(&mut padding);
-
-        //
-        // Всё, что XOR'ится: [длина][payload][padding].
-        //
-        let mut plaintext = Vec::with_capacity(LENGTH_PREFIX_LEN + payload.len() + pad_len);
-
-        plaintext.extend_from_slice(&payload_len.to_be_bytes());
-
-        plaintext.extend_from_slice(payload);
-
-        plaintext.extend_from_slice(&padding);
-
-        let mut out = Vec::with_capacity(SALT_LEN + plaintext.len());
-
+        let mut salt = [0u8; SALT_LEN];
+        fill_random(&mut salt);
+        let stream = self.keystream(&salt);
+        out.reserve(SALT_LEN + LENGTH_PREFIX_LEN + payload.len() + pad_len);
         out.extend_from_slice(&salt);
+        let body = out.len();
+        out.extend_from_slice(&payload_len.to_be_bytes());
+        out.extend_from_slice(payload);
+        let padding = out.len();
+        out.resize(padding + pad_len, 0);
+        fill_random(&mut out[padding..]);
+        xor_in_place(&mut out[body..], &stream);
+        Ok(())
+    }
 
-        out.extend(
-            plaintext
-                .iter()
-                .enumerate()
-                .map(|(index, byte)| byte ^ stream[index % KEY_LEN]),
-        );
-
-        Ok(out)
+    /// Decrypt only the framed payload in the receive buffer. Invalid lengths
+    /// are rejected before modifying bytes, without allocating for probe noise.
+    pub(crate) fn deobfuscate_in_place(&self, data: &mut [u8]) -> Option<std::ops::Range<usize>> {
+        if data.len() < SALT_LEN + LENGTH_PREFIX_LEN {
+            return None;
+        }
+        let salt = data[..SALT_LEN].try_into().ok()?;
+        let stream = self.keystream(&salt);
+        let len = u16::from_be_bytes([data[SALT_LEN] ^ stream[0], data[SALT_LEN + 1] ^ stream[1]])
+            as usize;
+        let start = SALT_LEN + LENGTH_PREFIX_LEN;
+        let end = start.checked_add(len)?;
+        if end > data.len() {
+            return None;
+        }
+        xor_in_place(&mut data[SALT_LEN..end], &stream);
+        Some(start..end)
     }
 
     pub(crate) fn gso_pad_len() -> usize {
@@ -278,9 +292,48 @@ impl ObfuscationKey {
     }
 }
 
+fn xor_in_place(data: &mut [u8], stream: &[u8; KEY_LEN]) {
+    for chunk in data.chunks_mut(KEY_LEN) {
+        for (byte, key) in chunk.iter_mut().zip(stream) {
+            *byte ^= key;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_place_decode_matches_legacy_decoder_for_every_padding_length() {
+        let key = ObfuscationKey::from_passphrase("buffer-compatibility-test");
+        let mut reused = Vec::with_capacity(2048);
+        let allocation = reused.as_ptr();
+        for size in [0, 1, 31, 32, 33, 1100, 1452] {
+            let payload: Vec<_> = (0..size).map(|n| n as u8).collect();
+            for padding in 0..=32 {
+                reused.clear();
+                reused.extend_from_slice(b"prefix");
+                key.obfuscate_padded_into(&payload, padding, &mut reused)
+                    .unwrap();
+                assert_eq!(&reused[..6], b"prefix");
+                assert_eq!(key.deobfuscate(&reused[6..]).unwrap(), payload);
+                let range = key.deobfuscate_in_place(&mut reused[6..]).unwrap();
+                assert_eq!(&reused[6 + range.start..6 + range.end], payload);
+                assert_eq!(allocation, reused.as_ptr(), "transmit buffer reallocated");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_in_place_length_is_rejected_without_changing_input() {
+        let key = ObfuscationKey::from_passphrase("buffer-compatibility-test");
+        let mut wire = key.obfuscate_padded(&[0xAB; 33], 0).unwrap();
+        wire.pop();
+        let before = wire.clone();
+        assert!(key.deobfuscate_in_place(&mut wire).is_none());
+        assert_eq!(wire, before);
+    }
 
     #[test]
     fn placeholder_passphrase_is_rejected() {

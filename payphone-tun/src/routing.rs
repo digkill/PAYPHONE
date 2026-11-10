@@ -5,7 +5,7 @@
 // в маршрутизации ОС. Без правок ниже:
 //
 // - клиент: через TUN идёт трафик ТОЛЬКО к адресам внутри
-//   10.77.0.0/24 (например, ping 10.77.0.1); весь остальной
+//   10.77.0.0/16 (например, ping 10.77.0.1); весь остальной
 //   трафик (браузер, "какой у меня IP") продолжает идти как
 //   раньше, мимо VPN — именно это и наблюдается, если не
 //   поменять default route.
@@ -18,8 +18,9 @@
 use std::{io, net::SocketAddr};
 
 /// CIDR подсети PAYPHONE VPN.
-pub const PAYPHONE_SUBNET_CIDR: &str = "10.77.0.0/24";
+pub const PAYPHONE_SUBNET_CIDR: &str = "10.77.0.0/16";
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const TUNNEL_GATEWAY: &str = "10.77.0.1";
 
 // =============================================================
@@ -92,7 +93,7 @@ pub fn enable_server_forwarding(subnet_cidr: &str) -> io::Result<()> {
 pub fn enable_server_forwarding(_subnet_cidr: &str) -> io::Result<()> {
     println!(
         "PAYPHONE: forwarding/NAT setup is only implemented for Linux; \
-         clients will only reach 10.77.0.0/24, not the wider internet"
+         clients will only reach 10.77.0.0/16, not the wider internet"
     );
 
     Ok(())
@@ -154,6 +155,8 @@ mod linux {
 /// исходная маршрутизация восстанавливается автоматически —
 /// это RAII, а не ручная очистка на каждом пути выхода.
 pub struct FullTunnelGuard {
+    /// Serializes OS maintenance with teardown, including late watchdog jobs.
+    active: std::sync::Mutex<bool>,
     server_ip: std::net::IpAddr,
 
     original_gateway: std::net::IpAddr,
@@ -198,6 +201,7 @@ impl FullTunnelGuard {
         macos::pin_dns_scutil();
 
         Ok(Self {
+            active: std::sync::Mutex::new(true),
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
@@ -211,6 +215,13 @@ impl FullTunnelGuard {
     /// both /1 defaults. Must be called from a real interval —
     /// not a sleep that is recreated on every VPN-loop iteration.
     pub fn ensure_tunnel_routes(&self) {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*active {
+            return;
+        }
         #[cfg(target_os = "macos")]
         {
             macos::restore_tunnel_routes(
@@ -271,6 +282,7 @@ impl FullTunnelGuard {
         linux_route::pin_dns(tun_name);
 
         Ok(Self {
+            active: std::sync::Mutex::new(true),
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
@@ -292,6 +304,7 @@ impl FullTunnelGuard {
         windows_route::pin_dns(tun_name);
 
         Ok(Self {
+            active: std::sync::Mutex::new(true),
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
@@ -309,10 +322,17 @@ impl FullTunnelGuard {
             "full-tunnel routing is only implemented for macOS, Linux, and Windows",
         ))
     }
-}
-
-impl Drop for FullTunnelGuard {
-    fn drop(&mut self) {
+    /// Stops maintenance before removing routes. Safe to call repeatedly, even
+    /// while a blocking watchdog job still holds an Arc to this guard.
+    pub fn teardown(&self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !*active {
+            return;
+        }
+        *active = false;
         if self.kill_switch {
             #[cfg(target_os = "macos")]
             {
@@ -366,6 +386,12 @@ impl Drop for FullTunnelGuard {
         {
             windows_route::teardown(self.server_ip, self.original_gateway, &self.tun_name);
         }
+    }
+}
+
+impl Drop for FullTunnelGuard {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 
@@ -988,16 +1014,26 @@ mod linux_route {
     }
 
     pub fn restore_tunnel_routes(server_ip: IpAddr, gateway: IpAddr, tun_name: &str) {
-        let _ = run_ip(&[
-            "route",
-            "replace",
-            &server_ip.to_string(),
-            "via",
-            &gateway.to_string(),
-        ]);
-        let _ = run_ip(&["route", "replace", "0.0.0.0/1", "dev", tun_name]);
-        let _ = run_ip(&["route", "replace", "128.0.0.0/1", "dev", tun_name]);
-        add_ipv6_blackholes();
+        // Replacing healthy routes invalidates live destination caches.
+        let ipv4_present = std::fs::read_to_string("/proc/net/route").is_ok_and(|table| {
+            super::linux_ipv4_tunnel_routes_present(&table, server_ip, gateway, tun_name)
+        });
+        if !ipv4_present {
+            let _ = run_ip(&[
+                "route",
+                "replace",
+                &server_ip.to_string(),
+                "via",
+                &gateway.to_string(),
+            ]);
+            let _ = run_ip(&["route", "replace", "0.0.0.0/1", "dev", tun_name]);
+            let _ = run_ip(&["route", "replace", "128.0.0.0/1", "dev", tun_name]);
+        }
+        let ipv6_present = std::fs::read_to_string("/proc/net/ipv6_route")
+            .is_ok_and(|table| super::linux_ipv6_blackholes_present(&table));
+        if !ipv6_present {
+            add_ipv6_blackholes();
+        }
         pin_dns(tun_name);
     }
 
@@ -1282,6 +1318,88 @@ mod windows_route {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn prefer_route(current: &mut Option<(u32, bool)>, metric: u32, expected: bool) {
+    match current {
+        Some((best, correct)) if *best == metric => *correct &= expected,
+        Some((best, _)) if *best < metric => {}
+        _ => *current = Some((metric, expected)),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_ipv4_tunnel_routes_present(
+    table: &str,
+    server: std::net::IpAddr,
+    gateway: std::net::IpAddr,
+    tun: &str,
+) -> bool {
+    let (std::net::IpAddr::V4(server), std::net::IpAddr::V4(gateway)) = (server, gateway) else {
+        return false;
+    };
+    // /proc prints the native integer representation of network-order bytes.
+    let server = u32::from_ne_bytes(server.octets());
+    let gateway = u32::from_ne_bytes(gateway.octets());
+    let half = u32::from_ne_bytes([128, 0, 0, 0]);
+    let mut found = [None; 3];
+    for line in table.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 8 {
+            continue;
+        }
+        let (Ok(destination), Ok(next_hop), Ok(flags), Ok(metric), Ok(mask)) = (
+            u32::from_str_radix(fields[1], 16),
+            u32::from_str_radix(fields[2], 16),
+            u32::from_str_radix(fields[3], 16),
+            fields[6].parse::<u32>(),
+            u32::from_str_radix(fields[7], 16),
+        ) else {
+            continue;
+        };
+        let up = flags & 1 != 0 && flags & 0x200 == 0;
+        if destination == server && mask == u32::MAX {
+            prefer_route(
+                &mut found[0],
+                metric,
+                up && fields[0] != tun && next_hop == gateway,
+            );
+        } else if mask == half && (destination == 0 || destination == half) {
+            let index = if destination == 0 { 1 } else { 2 };
+            prefer_route(
+                &mut found[index],
+                metric,
+                up && fields[0] == tun && next_hop == 0,
+            );
+        }
+    }
+    found.iter().all(|route| matches!(route, Some((_, true))))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_ipv6_blackholes_present(table: &str) -> bool {
+    const ZERO: &str = "00000000000000000000000000000000";
+    let mut found = [None; 2];
+    for line in table.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 10 || fields[1] != "01" || fields[2] != ZERO || fields[3] != "00" {
+            continue;
+        }
+        let index = match fields[0] {
+            ZERO => 0,
+            "80000000000000000000000000000000" => 1,
+            _ => continue,
+        };
+        let (Ok(metric), Ok(flags)) = (
+            u32::from_str_radix(fields[5], 16),
+            u32::from_str_radix(fields[8], 16),
+        ) else {
+            continue;
+        };
+        prefer_route(&mut found[index], metric, flags & 0x200 != 0);
+    }
+    found.iter().all(|route| matches!(route, Some((_, true))))
+}
+
 /// `ip route show default`: `default via 192.168.1.1 dev eth0 ...`
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_linux_default_iface(text: &str) -> Option<String> {
@@ -1410,6 +1528,56 @@ pub fn default_outbound_ipv4() -> Option<std::net::Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_ipv4_route_check_requires_the_best_routes_to_match() {
+        let server = "172.24.0.3".parse().unwrap();
+        let gateway = "172.24.0.1".parse().unwrap();
+        let half = u32::from_ne_bytes([128, 0, 0, 0]);
+        let server_hex = u32::from_ne_bytes([172, 24, 0, 3]);
+        let gateway_hex = u32::from_ne_bytes([172, 24, 0, 1]);
+        let low = format!("payphone0 00000000 00000000 0001 0 0 10 {half:08X} 0 0 0\n");
+        let high = format!("payphone0 {half:08X} 00000000 0001 0 0 10 {half:08X} 0 0 0\n");
+        let bypass = format!("eth0 {server_hex:08X} {gateway_hex:08X} 0007 0 0 0 FFFFFFFF 0 0 0\n");
+        let table =
+            format!("Iface Destination Gateway Flags RefCnt Use Metric Mask\n{low}{high}{bypass}");
+        let healthy =
+            |text: &str| linux_ipv4_tunnel_routes_present(text, server, gateway, "payphone0");
+        assert!(healthy(&table));
+        assert!(!healthy(&format!("{low}{bypass}")));
+        assert!(!healthy(&table.replace("eth0", "payphone0")));
+        assert!(!healthy(
+            &table.replace(&format!("{gateway_hex:08X}"), "00000000")
+        ));
+        assert!(!healthy("malformed table"));
+        for metric in [0, 10, 20] {
+            let other = format!("eth0 00000000 00000000 0001 0 0 {metric} {half:08X} 0 0 0\n");
+            assert_eq!(healthy(&format!("{table}{other}")), metric > 10);
+        }
+    }
+
+    #[test]
+    fn linux_ipv6_route_check_requires_both_unconditional_blackholes() {
+        let zero = "00000000000000000000000000000000";
+        let low = format!("{zero} 01 {zero} 00 {zero} 00000400 00000001 00000000 00200200 lo\n");
+        let high = low.replacen(zero, "80000000000000000000000000000000", 1);
+        let table = format!("{low}{high}");
+        assert!(linux_ipv6_blackholes_present(&table));
+        assert!(!linux_ipv6_blackholes_present(&low));
+        assert!(!linux_ipv6_blackholes_present(
+            &table.replace("00200200", "00000001")
+        ));
+        assert!(!linux_ipv6_blackholes_present(
+            &table.replace(" 00 ", " 40 ")
+        ));
+        assert!(!linux_ipv6_blackholes_present("malformed table"));
+        let competing = low
+            .replace("00000400", "00000001")
+            .replace("00200200", "00000001");
+        assert!(!linux_ipv6_blackholes_present(&format!(
+            "{table}{competing}"
+        )));
+    }
 
     #[test]
     fn parses_windows_route_print_gateway() {

@@ -1,3 +1,5 @@
+lib/arm64-v8a/libpayphone_jni.so->Project
+lib/arm64-v8a/libpayphone_mobile.so->Project
 lib/arm64-v8a/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
 lib/armeabi-v7a/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1
 lib/x86/libdatastore_shared_counter.so->androidx.datastore:datastore-core-android:1.1.1

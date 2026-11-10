@@ -221,7 +221,7 @@ private fun RowChips(selected: TransportKind, onSelect: (TransportKind) -> Unit)
             )
         }
         if (selected == TransportKind.Quic) {
-            MatrixTagline("QUIC needs native/ (Rust). Use TLS until built.")
+            MatrixTagline("QUIC uses the native PAYPHONE tunnel.")
         }
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import PayphoneKit
 import UniformTypeIdentifiers
 
 // Minimal settings form: server address, PSK, subscription token import,
@@ -15,6 +16,10 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section("Server") {
+                    Picker("Transport", selection: $settings.transport) {
+                        Text("QUIC / UDP").tag(TransportKind.quic)
+                        Text("TLS / TCP").tag(TransportKind.tls)
+                    }
                     TextField("host:port, e.g. 201.51.24.102:443", text: $settings.server)
                         .plainTextEntry()
 

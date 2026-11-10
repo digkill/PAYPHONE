@@ -169,3 +169,12 @@ payphone.pid
 payphone.sock
 
 .idea
+
+# Generated mobile QUIC libraries
+/payphone-android/app/src/main/jniLibs/
+/payphone-apple/PayphoneKit/Native/
+
+# Mobile build caches
+/payphone-apple/PayphoneKit/.build/
+/payphone-android/app/build/
+/vendor/quinn-proto/Cargo.lock

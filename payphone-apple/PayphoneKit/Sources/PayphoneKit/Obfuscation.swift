@@ -21,6 +21,7 @@ public struct ObfuscationKey: Sendable {
     private static let placeholderPassphrase = "change-me-to-a-real-random-secret"
 
     private let key: [UInt8]
+    var derivedBytes: [UInt8] { key }
 
     public init(passphrase: String) {
         self.key = Array(SHA256.hash(data: Array(passphrase.utf8)))

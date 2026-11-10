@@ -5,7 +5,7 @@
 //
 
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     time::{Duration, Instant},
 };
 
@@ -257,6 +257,9 @@ fn draw_centered(width: usize, row: usize, lines: &[&str]) {
 
 /// Краткая анимация digital rain перед подключением.
 pub fn rain_intro() {
+    if !io::stdout().is_terminal() {
+        return;
+    }
     let (term_w, term_h) = terminal_size();
 
     let width = term_w.saturating_sub(1).max(20);
@@ -354,27 +357,27 @@ pub struct FlowIndicator {
 
 impl FlowIndicator {
     pub fn new() -> Self {
-        let (term_w, term_h) = terminal_size();
+        let live = io::stdout().is_terminal();
+        let (term_w, term_h) = if live { terminal_size() } else { (20, 24) };
 
         let width = term_w.saturating_sub(1).max(20);
 
         let height = term_h.saturating_sub(14).clamp(10, 22);
 
-        print!("{HIDE_CURSOR}");
-
-        print!("{BRIGHT_GREEN}▸ follow the white rabbit · 0 pkts{RESET}\x1b[K\n");
-
-        for _ in 0..height {
-            println!();
+        if live {
+            print!("{HIDE_CURSOR}");
+            print!("{BRIGHT_GREEN}▸ follow the white rabbit · 0 pkts{RESET}\x1b[K\n");
+            for _ in 0..height {
+                println!();
+            }
+            let _ = io::stdout().flush();
         }
-
-        let _ = io::stdout().flush();
 
         Self {
             rain: Rain::new(width, height, 0xd1b54a32d192ed03, false),
             packet_count: 0,
             energy: 0,
-            live: true,
+            live,
             last_draw: Instant::now() - Duration::from_secs(1),
             frame_buf: String::with_capacity(width * height * 8),
         }
@@ -382,6 +385,9 @@ impl FlowIndicator {
 
     /// Исходящий (`▸`) или входящий (`◂`) пакет — сгущает дождь.
     pub fn pulse(&mut self, _symbol: char) {
+        if !self.live {
+            return;
+        }
         self.packet_count = self.packet_count.wrapping_add(1);
 
         self.energy = (self.energy + 3).min(80);

@@ -8,6 +8,7 @@ import com.payphone.android.protocol.FrameType
 import com.payphone.android.protocol.Messages
 import com.payphone.android.protocol.ProtocolConstants
 import com.payphone.android.transport.ObfuscationKey
+import com.payphone.android.transport.QuicFrameTransport
 import com.payphone.android.transport.TlsFrameChannel
 import com.payphone.android.transport.TlsTrustConfig
 import com.payphone.android.transport.TransportKind
@@ -59,16 +60,32 @@ class PayphoneClient(
         tlsTrust: TlsTrustConfig,
         saved: SavedSession?,
         protect: ((Socket) -> Boolean)? = null,
+        protectFd: ((Int) -> Boolean)? = null,
     ): Pair<FrameTransport, HandshakeResult> {
         require(subscriptionToken.size == ProtocolConstants.SUBSCRIPTION_TOKEN_SIZE) {
             "subscription token must be 135 bytes"
         }
         return when (transport) {
             TransportKind.Tls -> connectTls(server, tlsTrust, saved, protect)
-            TransportKind.Quic -> error(
-                "QUIC (UDP) needs payphone-android/native. Use TLS transport (port 40443) for now.",
-            )
+            TransportKind.Quic -> connectQuic(server, tlsTrust, saved, protectFd)
         }
+    }
+
+    private suspend fun connectQuic(
+        server: String, tlsTrust: TlsTrustConfig, saved: SavedSession?, protectFd: ((Int) -> Boolean)?,
+    ): Pair<FrameTransport, HandshakeResult> {
+        val (host, port) = resolveServer(server)
+        val trust = tlsTrust.copy(serverName = tlsTrust.serverName.ifBlank {
+            if (looksLikePublicDns(host)) host else "localhost"
+        })
+        val transport = QuicFrameTransport.connect(host, port, trust, obfuscationKey.derivedBytes(), protectFd)
+        try {
+            if (saved != null) {
+                val resumed = tryResume(transport, saved)
+                if (resumed != null) return transport to resumed
+            }
+            return transport to createNewSession(transport)
+        } catch (error: Throwable) { transport.close(); throw error }
     }
 
     private suspend fun connectTls(

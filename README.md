@@ -18,7 +18,7 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - CLI flags, `.env`, and optional `payphone.toml` for addresses, PSK, TLS, and token paths
 - TLS: pin a self-signed leaf, load PEM (`--tls-cert` / `--tls-key`, reload on mtime), or Let's Encrypt (`--tls-domain` / `PAYPHONE_TLS_DOMAIN`, TLS-ALPN-01). A public SNI makes the client trust WebPKI without a pin file.
 - Encrypted client resume file (`.payphone-session`)
-- Logical sessions with addresses from `10.77.0.0/24`
+- Logical sessions with addresses from `10.77.0.0/16`
 - Session resumption after a QUIC reconnect or a server restart (sessions are stored on disk)
 - Device and bandwidth limits from the subscription token
 - `Close` on shutdown (frees the VPN address immediately) and `Rekey` (rotates the resume token)
@@ -89,7 +89,7 @@ The server:
 
 - listens on `127.0.0.1:40404`;
 - creates `dev-certs/payphone-cert.der` and `dev-certs/payphone-key.der` when needed;
-- creates the server TUN interface at `10.77.0.1/24`;
+- creates the server TUN interface at `10.77.0.1/16`;
 - loads `auth-keys/subscription-public.key` with key ID `1`.
 
 ### 4. Start the client
@@ -176,13 +176,13 @@ Point the server at the same file with `--revoke-file` / `PAYPHONE_REVOKE_FILE` 
 
 Available plans currently encode these claims:
 
-| Plan | Device limit | Maximum Mbps |
+| Plan | Device limit | Maximum Mbps per direction, per session |
 | --- | ---: | ---: |
 | `basic` | 1 | 100 |
 | `pro` | 5 | 500 |
 | `unlimited` | 255 | 0 (unlimited) |
 
-Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. The server enforces the device limit (oldest session is replaced) and the Mbps cap (inner IP packets over the limit are dropped).
+Tokens are fixed-size 135-byte binary documents. Their signed claims include the key ID, token ID, client ID, issue/activation/expiry timestamps, plan, device limit, and bandwidth limit. The server enforces the device limit (oldest session is replaced) and independent upload/download Mbps caps per session (inner IP packets over the limit are dropped). Revocations are refreshed in the background every second; packet processing uses an in-memory snapshot.
 
 ## Wire obfuscation
 
@@ -379,7 +379,7 @@ cargo fmt --all -- --check
 - The server runs a UDP DNS stub on `10.77.0.1:53` and the client pins that address, so DNS fails closed if the tunnel drops instead of leaking to the ISP. Browser DoH still bypasses the stub but rides the tunnel.
 - Full-tunnel routing (`payphone_tun::routing`) is implemented for macOS, Linux, and Windows. Windows needs `wintun.dll` and an elevated process. IPv6 is blackholed on all three (`::/1` + `8000::/1`) so browsers fall back to IPv4 in the tunnel; there is still no in-tunnel IPv6. `--kill-switch` (default off) blackholes IPv4 too while the client is running if the tunnel is down. On-link LAN (printers, `192.168.x`) is not blocked. Windows also installs a catch-all NRPT rule so DNS is not still answered by the LAN resolver.
 - Token revocations live in `PAYPHONE_REVOKE_FILE` (hex `token_id` per line). That is not a distributed store.
-- Session sequence numbers reject frames more than 1024 behind the highest seen (reorder window). Exact duplicates inside that window still pass; QUIC/TLS already bind the datagram.
+- Session sequence numbers reject frames more than 65,536 behind the highest seen (reorder window). Exact duplicates inside that window still pass; QUIC/TLS already bind the datagram.
 - REALITY (optional, TCP only) splices probes to dest and authenticates PAYPHONE clients with Xray's session_id scheme plus an HMAC-SHA512 Ed25519 leaf. ClientHello follows uTLS `HelloChrome_131` (GREASE pinned first/last, shuffled middle, GREASE ECH, real ML-KEM-768 + X25519) — not bit-identical to a live Chrome capture, and Chrome itself drifts every month. Authenticated ServerHello copies dest's JA3S and patches only the X25519 key_share. Dest encrypted handshake and post-handshake record sizes are padded (three ALPN probe classes). Inner protocol is PAYPHONE, not VLESS.
 
 ## Security notice
@@ -389,3 +389,28 @@ The default TLS identity is still self-signed with SNI `localhost`; the client p
 ## Nodes
 
 [Model Daler — connection and operations](docs/model-daler.md): `89.40.233.36:8443`, QUIC and TLS, managed centrally in Coolify.
+
+[103.74.92.168 — connection and operations](docs/node-103.74.92.168.md): QUIC and TLS on `8443`, standalone Docker Compose alongside the existing proxy.
+
+## Capacity and performance
+
+The `/16` address pool supports up to 65,533 allocated sessions. This is an address-space limit, not a measured concurrency guarantee. Upgrade clients together with the server when migrating from `/24`, because older clients may not route the gateway for addresses outside `10.77.0.x`.
+
+The server indexes sessions by IPv4 and processes TUN output separately from accepts/cleanup. It fragments oversized IPv4 packets when DF is clear and generates rate-limited ICMP fragmentation-needed feedback when DF is set. The initial client MTU remains 1100.
+
+See [performance validation](docs/performance.md) for the local QUIC benchmark and end-to-end load procedure. No WAN throughput or concurrent-user capacity is guaranteed by unit tests.
+
+The workspace carries a [small local Quinn replay-window patch](vendor/quinn-proto/PATCHES.md) for delayed datagrams at broadband rates. Rebuild both VPN ends when adopting it; the PAYPHONE wire format is unchanged.
+
+## Mobile QUIC builds
+
+Android and Apple share `payphone-mobile` (Quinn datagrams, TLS certificate verification, UDP obfuscation). Build native artifacts before the app:
+
+```bash
+payphone-android/native/build.sh
+# then, from payphone-android/: ./gradlew :app:assembleDebug
+payphone-apple/build-native.sh
+# then build payphone-apple/Payphone.xcodeproj
+```
+
+Install the matching Rust targets first. Android requires an NDK and `aarch64-linux-android` (optionally `x86_64-linux-android`). Apple requires Xcode and `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `x86_64-apple-ios`. Generated libraries are ignored by Git. TLS remains available without native artifacts; QUIC selection requires them. Mobile QUIC trusts WebPKI roots or an explicit DER pin with hostname verification.

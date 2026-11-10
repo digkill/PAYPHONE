@@ -28,7 +28,7 @@ use crate::session::{ClientLink, CreateSessionError, SessionManager, accept_sequ
 
 const SERVER_CAPABILITIES: u32 = CAP_IPV4 | CAP_DNS | CAP_RESUME;
 
-pub type PayphoneVerifier = SubscriptionVerifier<FileRevocationStore>;
+pub type PayphoneVerifier = SubscriptionVerifier<Arc<FileRevocationStore>>;
 
 pub async fn handle_frame(
     link: ClientLink,
@@ -352,7 +352,7 @@ async fn handle_data(
             return;
         }
 
-        if !session.rate.allow(data.payload.len() as u64) {
+        if !session.upload_rate.allow(data.payload.len() as u64) {
             return;
         }
 
