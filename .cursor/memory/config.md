@@ -44,6 +44,7 @@
 | `PAYPHONE_SESSION_FILE` | `.payphone-session` |
 | `PAYPHONE_REALITY_PUBLIC_KEY` / `SHORT_ID` / `SNI` | только tls-транспорт |
 | `PAYPHONE_KILL_SWITCH` | `false` |
+| `PAYPHONE_EXCLUDE_FILE` | `--exclude`, toml `exclude_file`; default `payphone-exclude.json` если есть (явный путь обязан существовать). Поддерживает IPv4/CIDR и DNS names, которые разрешаются в IPv4 при старте; apex добавляет `www`. Шаблон `payphone-exclude.example.json`, сам файл в `.gitignore` |
 
 ## Resume-файл клиента
 

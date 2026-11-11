@@ -28,6 +28,7 @@ use payphone_transport::{
     obfuscation::ObfuscationKey,
 };
 
+mod exclusions;
 mod matrix;
 mod session_file;
 mod settings;
@@ -438,6 +439,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
+    if let Some(path) = &settings.exclude_file {
+        matrix::status(&format!(
+            "Exclusions: {} route(s) bypass the VPN ({})",
+            settings.exclusions.len(),
+            path.display()
+        ));
+    }
+
     let bind_iface = payphone_tun::routing::default_physical_interface();
 
     let bind_ip = payphone_tun::routing::default_outbound_ipv4().map(IpAddr::V4);
@@ -514,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             incoming,
             quic,
             settings.kill_switch,
+            &settings.exclusions,
         )
         .await?
         {

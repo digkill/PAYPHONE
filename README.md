@@ -24,6 +24,7 @@ PAYPHONE is an experimental IPv4 VPN written in Rust. It carries IP packets from
 - `Close` on shutdown (frees the VPN address immediately) and `Rekey` (rotates the resume token)
 - Periodic `PING`/`PONG` keepalives
 - Optional client kill switch (`--kill-switch` / `PAYPHONE_KILL_SWITCH`): no Internet unless the VPN is up; default off. Ctrl+C restores the LAN.
+- Split-tunnel exclusions on the desktop client: IPv4 addresses/CIDRs from `payphone-exclude.json` bypass the VPN (see [Excluding addresses from the VPN](#excluding-addresses-from-the-vpn)).
 - Source-address validation for packets received from clients
 - Concurrent client handling with Tokio
 - Full-tunnel routing: the server enables IPv4 forwarding + NAT for the tunnel subnet, and the client overrides its default route through the TUN interface (macOS, Linux, Windows) with IPv6 blackholed so AAAA cannot leak past the tunnel
@@ -110,6 +111,25 @@ ping 10.77.0.1
 ```
 
 Press `Ctrl+C` to stop either process.
+
+#### Excluding addresses from the VPN
+
+IPv4 destinations listed in a JSON file keep using the LAN gateway instead of the tunnel. Copy the template and edit it:
+
+```bash
+cp payphone-exclude.example.json payphone-exclude.json
+```
+
+```json
+{
+  "comment": "optional, ignored",
+  "exclude": ["192.168.0.0/16", "203.0.113.7", "198.51.100.0/255.255.255.0"]
+}
+```
+
+The client loads `payphone-exclude.json` from the working directory if it exists; `--exclude PATH`, `PAYPHONE_EXCLUDE_FILE`, or `exclude_file` in `payphone.toml` point elsewhere (an explicit path must exist). Entries are a bare address (`/32`), a prefix length, or a dotted netmask. The client refuses to start on a malformed entry, IPv6 (all IPv6 is blocked while the VPN is up), host bits set (`192.168.1.5/24`), prefixes shorter than `/2`, and anything overlapping `10.77.0.0/16` or `127.0.0.0/8`. Duplicates and nested blocks are collapsed; at most 4096 routes.
+
+Each entry becomes a route via the LAN gateway on macOS, Linux, and Windows, is re-checked by the route watchdog, and is removed on exit. If a route for the exact same prefix already exists (for example the on-link LAN `192.168.1.0/24`), it is left alone and reported as skipped. DNS still goes to `10.77.0.1` inside the tunnel. With `--kill-switch`, excluded addresses are blocked too while the tunnel is down.
 
 ### 5. Test session resumption
 

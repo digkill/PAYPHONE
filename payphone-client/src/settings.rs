@@ -5,6 +5,9 @@ use std::{
 };
 
 use payphone_core::{DEFAULT_PORT, DEFAULT_TCP_PORT};
+use payphone_tun::exclude::Ipv4Net;
+
+use crate::exclusions::{self, DEFAULT_EXCLUDE_FILE};
 use payphone_transport::{
     identity::ClientTlsConfig,
     reality::{RealityClientConfig, dest_host, parse_32_bytes, parse_short_id},
@@ -27,6 +30,8 @@ pub struct ClientSettings {
     pub tls: ClientTlsConfig,
     pub dev_mode: bool,
     pub kill_switch: bool,
+    pub exclusions: Vec<Ipv4Net>,
+    pub exclude_file: Option<PathBuf>,
 }
 
 pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Error>> {
@@ -188,6 +193,22 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         || file_flag(&file, "dev")
         || file_flag(&file, "dev_mode");
 
+    // An explicit path must exist; the default file is optional.
+    let exclude_file = match first([
+        cli.exclude.as_deref(),
+        env_opt("PAYPHONE_EXCLUDE_FILE").as_deref(),
+        file.get("exclude_file").map(String::as_str),
+        file.get("exclude").map(String::as_str),
+    ]) {
+        Some(path) => Some(PathBuf::from(path)),
+        None => Some(PathBuf::from(DEFAULT_EXCLUDE_FILE)).filter(|path| path.exists()),
+    };
+
+    let exclusions = match &exclude_file {
+        Some(path) => exclusions::load(path)?,
+        None => Vec::new(),
+    };
+
     Ok(ClientSettings {
         server,
         tcp_server,
@@ -198,6 +219,8 @@ pub fn load_client_settings() -> Result<ClientSettings, Box<dyn std::error::Erro
         tls,
         dev_mode,
         kill_switch,
+        exclusions,
+        exclude_file,
     })
 }
 
@@ -225,6 +248,8 @@ Options:
       --reality-short-id HEX
       --reality-sni NAME   ClientHello SNI (dest hostname, not the pin SAN)
       --kill-switch        no Internet unless the VPN is up (default off)
+      --exclude PATH       JSON list of IPv4 addresses/CIDRs that bypass the VPN
+                           (default {DEFAULT_EXCLUDE_FILE} if present)
   -c, --config PATH        optional payphone.toml (also PAYPHONE_CONFIG)
       --dev                log raw UDP datagrams
   -h, --help
@@ -249,6 +274,7 @@ struct Cli {
     reality_pubkey: Option<String>,
     reality_short_id: Option<String>,
     reality_sni: Option<String>,
+    exclude: Option<String>,
     config: Option<PathBuf>,
     dev: bool,
     kill_switch: bool,
@@ -332,6 +358,7 @@ impl Cli {
             "reality-pubkey" | "reality-public-key" => self.reality_pubkey = Some(value),
             "reality-short-id" => self.reality_short_id = Some(value),
             "reality-sni" => self.reality_sni = Some(value),
+            "exclude" | "exclude-file" => self.exclude = Some(value),
             "kill-switch" => {
                 self.kill_switch = parse_bool_flag(&value)?;
             }

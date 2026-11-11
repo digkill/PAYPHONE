@@ -130,6 +130,7 @@ pub async fn run_tunnel(
     mut incoming: mpsc::Receiver<Frame>,
     quic: Option<QuicShutdown>,
     kill_switch: bool,
+    exclusions: &[payphone_tun::exclude::Ipv4Net],
 ) -> Result<TunnelExit, Box<dyn std::error::Error>> {
     if let VpnSink::Quic(connection) = &sink {
         payphone_transport::log_quic_stats(connection);
@@ -148,9 +149,18 @@ pub async fn run_tunnel(
         server_address,
         &tun_name,
         kill_switch,
+        exclusions,
     ) {
         Ok(guard) => {
             matrix::status("Full-tunnel routing enabled (all traffic now goes through PAYPHONE)");
+
+            if !exclusions.is_empty() {
+                matrix::status(&format!(
+                    "Excluded from VPN: {} of {} route(s) installed",
+                    guard.excluded_routes().len(),
+                    exclusions.len()
+                ));
+            }
 
             matrix::tunnel_open_banner();
 

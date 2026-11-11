@@ -1,0 +1,9 @@
+{
+  "comment": "Copy to payphone-exclude.json. IPv4 addresses, CIDRs, and DNS names listed here bypass the VPN. DNS names resolve once at client startup; apex names also include www.",
+  "exclude": [
+    "192.168.0.0/16",
+    "203.0.113.7",
+    "198.51.100.0/255.255.255.0",
+    "ozon.ru"
+  ]
+}

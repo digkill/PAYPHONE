@@ -2,6 +2,7 @@ use std::{io, net::Ipv4Addr, sync::Arc};
 
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+pub mod exclude;
 pub mod ipv4;
 pub mod routing;
 

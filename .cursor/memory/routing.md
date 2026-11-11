@@ -30,6 +30,16 @@
 - DNS: пин на `10.77.0.1`. Windows — catch-all NRPT, чтобы LAN-резолвер не отвечал
 - macOS: **не вызывать `networksetup`** (ломает таблицу маршрутов). IPv6 — `route -blackhole`, DNS — `scutil`. Нужен **unscoped** `/32`, не только `-ifscope`. UDP: `IP_BOUND_IF` на Wi-Fi. Watchdog маршрутов — отдельный `interval` ~400ms, **не** таймер внутри `select` на каждый TUN-пакет
 
+## Исключения (split tunnel, десктоп)
+
+`payphone-exclude.json` (`{"exclude": [...], "comment": ...}`, `deny_unknown_fields`) supports IPv4 address/CIDR/netmask entries and DNS names. DNS names resolve to IPv4 routes once at client startup; apex names also resolve `www.<domain>`. This is a snapshot, not wildcard/subdomain matching: restart the client after DNS changes, and list other hostnames used by a site separately. Validation rejects host bits, IPv6, prefix < /2, overlap with `10.77.0.0/16` or `127/8`, and > 4096 resulting routes. Nested/duplicate routes are collapsed.
+
+- Маршрут через LAN-шлюз ставит `FullTunnelGuard::install(..., exclusions)` после `/1`. Владение: guard хранит **только добавленные им** маршруты. Существующий точный префикс (on-link LAN) не трогать: macOS/Linux `add` → `File exists` = skip; Windows сверяет снимок `route print -4` до установки (иначе Windows добавит второй маршрут и LAN пойдёт через роутер). Linux — `ip route add`, не `replace`.
+- Ошибка установки исключения не фатальна: адрес остаётся в туннеле (не утечка).
+- Watchdog: Linux сверяет `/proc/net/route` без процессов; macOS проверяет по 8 за тик round-robin, все сразу если чинились `/32` или `/1`; Windows повторяет `route add` по 8 за тик.
+- Teardown снимает исключения **всегда**, до kill-switch ветки: при kill switch и упавшем туннеле исключённые адреса тоже заблокированы.
+- Android/iOS пока не поддерживают.
+
 Kill-switch (`--kill-switch` / `PAYPHONE_KILL_SWITCH`, default **off**): пока клиент жив, IPv4 тоже в blackhole если туннель упал. On-link LAN (`192.168.x` и т.п.) не режется. Ctrl+C обязан вернуть LAN.
 
 ## Full-tunnel (сервер)

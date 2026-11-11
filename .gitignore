@@ -54,6 +54,9 @@
 /payphone.toml
 **/payphone.toml
 
+# Per-user split-tunnel exclusions (template: payphone-exclude.example.json)
+/payphone-exclude.json
+
 *.secret
 *.secrets
 

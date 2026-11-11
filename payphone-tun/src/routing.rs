@@ -17,8 +17,15 @@
 
 use std::{io, net::SocketAddr};
 
+use crate::exclude::Ipv4Net;
+
 /// CIDR подсети PAYPHONE VPN.
 pub const PAYPHONE_SUBNET_CIDR: &str = "10.77.0.0/16";
+
+/// Exclusion routes re-checked per watchdog tick where each check spawns a
+/// process; a repaired tunnel re-asserts all of them at once.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const EXCLUSION_CHECKS_PER_TICK: usize = 8;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const TUNNEL_GATEWAY: &str = "10.77.0.1";
@@ -166,6 +173,13 @@ pub struct FullTunnelGuard {
     /// When set, Drop keeps the kill-switch block (no ISP default).
     kill_switch: bool,
 
+    /// Exclusion routes this guard added. Routes that already existed
+    /// (for example the on-link LAN prefix) are never touched or deleted.
+    excluded: Vec<Ipv4Net>,
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    exclude_cursor: std::sync::atomic::AtomicUsize,
+
     #[cfg(target_os = "macos")]
     physical_iface: String,
 }
@@ -175,12 +189,14 @@ impl FullTunnelGuard {
     ///
     /// `server_address` — реальный (не VPN) адрес PAYPHONE
     /// server, к которому уже установлено QUIC-соединение;
-    /// `tun_name` — имя TUN-интерфейса клиента.
+    /// `tun_name` — имя TUN-интерфейса клиента;
+    /// `exclusions` — сети, которые идут мимо VPN через LAN-шлюз.
     #[cfg(target_os = "macos")]
     pub fn install(
         server_address: SocketAddr,
         tun_name: &str,
         kill_switch: bool,
+        exclusions: &[Ipv4Net],
     ) -> io::Result<Self> {
         let server_ip = server_address.ip();
 
@@ -200,14 +216,25 @@ impl FullTunnelGuard {
 
         macos::pin_dns_scutil();
 
+        let excluded = install_exclusions(exclusions, |net| {
+            macos::add_exclusion(net, original_gateway)
+        });
+
         Ok(Self {
             active: std::sync::Mutex::new(true),
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
             kill_switch,
+            excluded,
+            exclude_cursor: Default::default(),
             physical_iface,
         })
+    }
+
+    /// Exclusion routes that were actually installed by this guard.
+    pub fn excluded_routes(&self) -> &[Ipv4Net] {
+        &self.excluded
     }
 
     /// macOS (DHCP, sleep, configd) can delete our routes while
@@ -224,11 +251,23 @@ impl FullTunnelGuard {
         }
         #[cfg(target_os = "macos")]
         {
-            macos::restore_tunnel_routes(
+            let repaired = macos::restore_tunnel_routes(
                 self.server_ip,
                 self.original_gateway,
                 &self.physical_iface,
             );
+
+            let batch = if repaired {
+                self.excluded.len()
+            } else {
+                EXCLUSION_CHECKS_PER_TICK
+            };
+
+            for net in self.next_exclusions(batch) {
+                if !macos::exclusion_ok(net, self.original_gateway) {
+                    let _ = macos::add_exclusion(net, self.original_gateway);
+                }
+            }
         }
 
         #[cfg(target_os = "windows")]
@@ -238,6 +277,10 @@ impl FullTunnelGuard {
                 self.original_gateway,
                 &self.tun_name,
             );
+
+            for net in self.next_exclusions(EXCLUSION_CHECKS_PER_TICK) {
+                windows_route::readd_exclusion(net, self.original_gateway);
+            }
         }
 
         #[cfg(target_os = "linux")]
@@ -246,6 +289,7 @@ impl FullTunnelGuard {
                 self.server_ip,
                 self.original_gateway,
                 &self.tun_name,
+                &self.excluded,
             );
         }
 
@@ -255,11 +299,44 @@ impl FullTunnelGuard {
         }
     }
 
+    /// Round-robin slice of the exclusion list for the watchdog.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn next_exclusions(&self, count: usize) -> impl Iterator<Item = Ipv4Net> + '_ {
+        let len = self.excluded.len();
+        let count = count.min(len);
+        let start = if len == 0 {
+            0
+        } else {
+            self.exclude_cursor
+                .fetch_add(count, std::sync::atomic::Ordering::Relaxed)
+                % len
+        };
+
+        (0..count).map(move |offset| self.excluded[(start + offset) % len])
+    }
+
+    fn remove_exclusions(&self) {
+        for &net in &self.excluded {
+            #[cfg(target_os = "macos")]
+            macos::remove_exclusion(net, self.original_gateway);
+
+            #[cfg(target_os = "linux")]
+            linux_route::remove_exclusion(net, self.original_gateway);
+
+            #[cfg(target_os = "windows")]
+            windows_route::remove_exclusion(net, self.original_gateway);
+
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+            let _ = net;
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub fn install(
         server_address: SocketAddr,
         tun_name: &str,
         kill_switch: bool,
+        exclusions: &[Ipv4Net],
     ) -> io::Result<Self> {
         let server_ip = server_address.ip();
 
@@ -281,12 +358,17 @@ impl FullTunnelGuard {
 
         linux_route::pin_dns(tun_name);
 
+        let excluded = install_exclusions(exclusions, |net| {
+            linux_route::add_exclusion(net, original_gateway)
+        });
+
         Ok(Self {
             active: std::sync::Mutex::new(true),
             server_ip,
             original_gateway,
             tun_name: tun_name.to_string(),
             kill_switch,
+            excluded,
         })
     }
 
@@ -295,13 +377,19 @@ impl FullTunnelGuard {
         server_address: SocketAddr,
         tun_name: &str,
         kill_switch: bool,
+        exclusions: &[Ipv4Net],
     ) -> io::Result<Self> {
         let server_ip = server_address.ip();
         let original_gateway = windows_route::default_gateway()?;
+        let routes_before = windows_route::route_table();
         windows_route::add_host_bypass(server_ip, original_gateway)?;
         windows_route::add_split_default(windows_route::interface_index(tun_name))?;
         windows_route::add_ipv6_blackholes();
         windows_route::pin_dns(tun_name);
+
+        let excluded = install_exclusions(exclusions, |net| {
+            windows_route::add_exclusion(net, original_gateway, &routes_before)
+        });
 
         Ok(Self {
             active: std::sync::Mutex::new(true),
@@ -309,6 +397,8 @@ impl FullTunnelGuard {
             original_gateway,
             tun_name: tun_name.to_string(),
             kill_switch,
+            excluded,
+            exclude_cursor: Default::default(),
         })
     }
 
@@ -317,6 +407,7 @@ impl FullTunnelGuard {
         _server_address: SocketAddr,
         _tun_name: &str,
         _kill_switch: bool,
+        _exclusions: &[Ipv4Net],
     ) -> io::Result<Self> {
         Err(io::Error::other(
             "full-tunnel routing is only implemented for macOS, Linux, and Windows",
@@ -333,6 +424,8 @@ impl FullTunnelGuard {
             return;
         }
         *active = false;
+        // Excluded hosts must not outlive the process or bypass a re-armed kill switch.
+        self.remove_exclusions();
         if self.kill_switch {
             #[cfg(target_os = "macos")]
             {
@@ -393,6 +486,28 @@ impl Drop for FullTunnelGuard {
     fn drop(&mut self) {
         self.teardown();
     }
+}
+
+/// Adds each exclusion via the LAN gateway and keeps only the ones this
+/// process created. A failed exclusion stays inside the tunnel, never leaks.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn install_exclusions(
+    requested: &[Ipv4Net],
+    mut add: impl FnMut(Ipv4Net) -> io::Result<bool>,
+) -> Vec<Ipv4Net> {
+    let mut owned = Vec::with_capacity(requested.len());
+
+    for &net in requested {
+        match add(net) {
+            Ok(true) => owned.push(net),
+            Ok(false) => {
+                eprintln!("PAYPHONE: exclusion {net} skipped: a route for it already exists")
+            }
+            Err(error) => eprintln!("PAYPHONE: exclusion {net} not installed: {error}"),
+        }
+    }
+
+    owned
 }
 
 /// Blocks Internet except the PAYPHONE server while the client process
@@ -522,6 +637,8 @@ impl Drop for KillSwitchGuard {
 mod macos {
     use std::{io, net::IpAddr, process::Command};
 
+    use crate::exclude::Ipv4Net;
+
     pub fn default_gateway() -> io::Result<IpAddr> {
         let output = Command::new("route")
             .args(["-n", "get", "default"])
@@ -611,12 +728,19 @@ mod macos {
         add_host_bypass(server_ip, gateway, iface)
     }
 
-    pub fn restore_tunnel_routes(server_ip: IpAddr, gateway: IpAddr, iface: &str) {
+    /// Returns true when IPv4 tunnel routes had to be repaired.
+    pub fn restore_tunnel_routes(server_ip: IpAddr, gateway: IpAddr, iface: &str) -> bool {
+        let mut repaired = false;
+
         if !host_route_ok(server_ip, gateway) {
+            repaired = true;
+
             let _ = add_host_bypass(server_ip, gateway, iface);
         }
 
         if !split_default_ok() {
+            repaired = true;
+
             let _ = add_host_bypass(server_ip, gateway, iface);
 
             let _ = run_route(&["add", "-inet", "-net", "0.0.0.0/1", super::TUNNEL_GATEWAY]);
@@ -631,6 +755,73 @@ mod macos {
         }
 
         refresh_dns_scutil();
+
+        repaired
+    }
+
+    fn exclusion_args<'a>(
+        action: &'a str,
+        net: Ipv4Net,
+        dest: &'a str,
+        gw: &'a str,
+    ) -> [&'a str; 5] {
+        let kind = if net.prefix() == 32 { "-host" } else { "-net" };
+
+        [action, "-inet", kind, dest, gw]
+    }
+
+    fn exclusion_dest(net: Ipv4Net) -> String {
+        if net.prefix() == 32 {
+            net.network().to_string()
+        } else {
+            net.to_string()
+        }
+    }
+
+    /// `Ok(false)` when the exact prefix is already routed (on-link LAN,
+    /// a static route): that route is not ours and must survive teardown.
+    pub fn add_exclusion(net: Ipv4Net, gateway: IpAddr) -> io::Result<bool> {
+        let dest = exclusion_dest(net);
+        let gw = gateway.to_string();
+        let args = exclusion_args("add", net, &dest, &gw);
+
+        let output = Command::new("route").args(args).output()?;
+
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        if text.contains("File exists") {
+            return Ok(false);
+        }
+
+        Err(io::Error::other(format!(
+            "route {} failed: {}",
+            args.join(" "),
+            text.trim()
+        )))
+    }
+
+    pub fn remove_exclusion(net: Ipv4Net, gateway: IpAddr) {
+        let dest = exclusion_dest(net);
+        let gw = gateway.to_string();
+
+        let _ = run_route(&exclusion_args("delete", net, &dest, &gw));
+    }
+
+    pub fn exclusion_ok(net: Ipv4Net, gateway: IpAddr) -> bool {
+        let Some((current, iface)) = route_get_inet(&net.network().to_string()) else {
+            return false;
+        };
+
+        current.and_then(|value| value.parse::<IpAddr>().ok()) == Some(gateway)
+            && !iface.is_some_and(|name| name.starts_with("utun"))
     }
 
     /// Unscoped /32 via the LAN gateway. `-ifscope` alone is not
@@ -910,6 +1101,8 @@ mod macos {
 mod linux_route {
     use std::{io, net::IpAddr, process::Command};
 
+    use crate::exclude::Ipv4Net;
+
     pub fn default_gateway() -> io::Result<IpAddr> {
         let output = Command::new("ip")
             .args(["route", "show", "default"])
@@ -1013,10 +1206,53 @@ mod linux_route {
         let _ = run_ip(&["-6", "route", "del", "blackhole", "8000::/1"]);
     }
 
-    pub fn restore_tunnel_routes(server_ip: IpAddr, gateway: IpAddr, tun_name: &str) {
+    /// `ip route add`, not `replace`: an existing route for the same prefix
+    /// (on-link LAN) is someone else's and is reported as `Ok(false)`.
+    pub fn add_exclusion(net: Ipv4Net, gateway: IpAddr) -> io::Result<bool> {
+        let dest = net.to_string();
+        let gw = gateway.to_string();
+
+        let output = Command::new("ip")
+            .args(["route", "add", &dest, "via", &gw])
+            .output()?;
+
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if stderr.contains("File exists") {
+            return Ok(false);
+        }
+
+        Err(io::Error::other(format!(
+            "ip route add {dest} via {gw} failed: {}",
+            stderr.trim()
+        )))
+    }
+
+    pub fn remove_exclusion(net: Ipv4Net, gateway: IpAddr) {
+        let _ = run_ip(&[
+            "route",
+            "del",
+            &net.to_string(),
+            "via",
+            &gateway.to_string(),
+        ]);
+    }
+
+    pub fn restore_tunnel_routes(
+        server_ip: IpAddr,
+        gateway: IpAddr,
+        tun_name: &str,
+        excluded: &[Ipv4Net],
+    ) {
+        let table = std::fs::read_to_string("/proc/net/route").ok();
+
         // Replacing healthy routes invalidates live destination caches.
-        let ipv4_present = std::fs::read_to_string("/proc/net/route").is_ok_and(|table| {
-            super::linux_ipv4_tunnel_routes_present(&table, server_ip, gateway, tun_name)
+        let ipv4_present = table.as_deref().is_some_and(|table| {
+            super::linux_ipv4_tunnel_routes_present(table, server_ip, gateway, tun_name)
         });
         if !ipv4_present {
             let _ = run_ip(&[
@@ -1028,6 +1264,13 @@ mod linux_route {
             ]);
             let _ = run_ip(&["route", "replace", "0.0.0.0/1", "dev", tun_name]);
             let _ = run_ip(&["route", "replace", "128.0.0.0/1", "dev", tun_name]);
+        }
+        let missing = match table.as_deref() {
+            Some(table) => super::linux_missing_exclusions(table, excluded, gateway, tun_name),
+            None => excluded.to_vec(),
+        };
+        for net in missing {
+            let _ = add_exclusion(net, gateway);
         }
         let ipv6_present = std::fs::read_to_string("/proc/net/ipv6_route")
             .is_ok_and(|table| super::linux_ipv6_blackholes_present(&table));
@@ -1048,6 +1291,8 @@ mod linux_route {
 mod windows_route {
     use std::{io, net::IpAddr, process::Command};
 
+    use crate::exclude::Ipv4Net;
+
     pub fn default_gateway() -> io::Result<IpAddr> {
         let output = Command::new("route").args(["print", "-4"]).output()?;
 
@@ -1057,6 +1302,55 @@ mod windows_route {
 
         super::parse_windows_route_print_gateway(&String::from_utf8_lossy(&output.stdout))
             .ok_or_else(|| io::Error::other("no IPv4 default gateway in `route print -4`"))
+    }
+
+    pub fn route_table() -> String {
+        Command::new("route")
+            .args(["print", "-4"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Windows happily keeps a second route for an on-link prefix, which
+    /// would push LAN traffic through the router; skip prefixes already listed.
+    pub fn add_exclusion(net: Ipv4Net, gateway: IpAddr, routes_before: &str) -> io::Result<bool> {
+        if super::windows_route_table_has(routes_before, net) {
+            return Ok(false);
+        }
+
+        run_route(&[
+            "add",
+            &net.network().to_string(),
+            "mask",
+            &net.mask().to_string(),
+            &gateway.to_string(),
+            "metric",
+            "1",
+        ])
+        .map(|()| true)
+    }
+
+    pub fn readd_exclusion(net: Ipv4Net, gateway: IpAddr) {
+        let _ = run_route(&[
+            "add",
+            &net.network().to_string(),
+            "mask",
+            &net.mask().to_string(),
+            &gateway.to_string(),
+            "metric",
+            "1",
+        ]);
+    }
+
+    pub fn remove_exclusion(net: Ipv4Net, gateway: IpAddr) {
+        let _ = run_route(&[
+            "delete",
+            &net.network().to_string(),
+            "mask",
+            &net.mask().to_string(),
+            &gateway.to_string(),
+        ]);
     }
 
     pub fn interface_index(tun_name: &str) -> Option<u32> {
@@ -1375,6 +1669,57 @@ fn linux_ipv4_tunnel_routes_present(
     found.iter().all(|route| matches!(route, Some((_, true))))
 }
 
+/// Owned exclusions whose best `/proc/net/route` entry is not ours
+/// (via `gateway`, off the TUN, up).
+#[cfg(any(target_os = "linux", test))]
+fn linux_missing_exclusions(
+    table: &str,
+    excluded: &[Ipv4Net],
+    gateway: std::net::IpAddr,
+    tun: &str,
+) -> Vec<Ipv4Net> {
+    if excluded.is_empty() {
+        return Vec::new();
+    }
+    let std::net::IpAddr::V4(gateway) = gateway else {
+        return excluded.to_vec();
+    };
+    let gateway = u32::from_ne_bytes(gateway.octets());
+    let mut best = std::collections::HashMap::<(u32, u32), Option<(u32, bool)>>::new();
+    for line in table.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 8 {
+            continue;
+        }
+        let (Ok(destination), Ok(next_hop), Ok(flags), Ok(metric), Ok(mask)) = (
+            u32::from_str_radix(fields[1], 16),
+            u32::from_str_radix(fields[2], 16),
+            u32::from_str_radix(fields[3], 16),
+            fields[6].parse::<u32>(),
+            u32::from_str_radix(fields[7], 16),
+        ) else {
+            continue;
+        };
+        let up = flags & 1 != 0 && flags & 0x200 == 0;
+        prefer_route(
+            best.entry((destination, mask)).or_default(),
+            metric,
+            up && fields[0] != tun && next_hop == gateway,
+        );
+    }
+    excluded
+        .iter()
+        .copied()
+        .filter(|net| {
+            let key = (
+                u32::from_ne_bytes(net.network().octets()),
+                u32::from_ne_bytes(net.mask().octets()),
+            );
+            !matches!(best.get(&key), Some(Some((_, true))))
+        })
+        .collect()
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_ipv6_blackholes_present(table: &str) -> bool {
     const ZERO: &str = "00000000000000000000000000000000";
@@ -1427,6 +1772,18 @@ fn parse_windows_route_print_gateway(text: &str) -> Option<std::net::IpAddr> {
     }
 
     None
+}
+
+/// Any `route print -4` row (active or persistent) for exactly this prefix.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_route_table_has(text: &str, net: Ipv4Net) -> bool {
+    let network = net.network().to_string();
+    let mask = net.mask().to_string();
+
+    text.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        cols.next() == Some(network.as_str()) && cols.next() == Some(mask.as_str())
+    })
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -1610,6 +1967,59 @@ Idx     Met         MTU          State                Name
         assert_eq!(parse_netsh_interface_index(sample, "payphone"), Some(12));
         assert_eq!(parse_netsh_interface_index(sample, "PAYPHONE"), Some(12));
         assert_eq!(parse_netsh_interface_index(sample, "missing"), None);
+    }
+
+    #[test]
+    fn linux_exclusion_check_reports_only_missing_or_wrong_routes() {
+        let gateway = "172.24.0.1".parse().unwrap();
+        let gw = u32::from_ne_bytes([172, 24, 0, 1]);
+        let lan: Ipv4Net = "192.168.0.0/16".parse().unwrap();
+        let host: Ipv4Net = "203.0.113.7".parse().unwrap();
+        let absent: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+        let row = |net: Ipv4Net, iface: &str, hop: u32, flags: &str, metric: u32| {
+            format!(
+                "{iface} {:08X} {hop:08X} {flags} 0 0 {metric} {:08X} 0 0 0\n",
+                u32::from_ne_bytes(net.network().octets()),
+                u32::from_ne_bytes(net.mask().octets()),
+            )
+        };
+        let table = format!(
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask\n{}{}",
+            row(lan, "eth0", gw, "0003", 0),
+            row(host, "eth0", gw, "0007", 0),
+        );
+        let excluded = [lan, host, absent];
+        let missing = |text: &str| linux_missing_exclusions(text, &excluded, gateway, "payphone0");
+
+        assert_eq!(missing(&table), [absent]);
+        assert_eq!(
+            missing(&format!("{table}{}", row(host, "payphone0", 0, "0001", 0))),
+            [host, absent]
+        );
+        assert_eq!(
+            missing(&format!("{table}{}", row(host, "payphone0", 0, "0001", 5))),
+            [absent]
+        );
+        assert_eq!(missing(&table.replace("0003", "0203")), [lan, absent]);
+        assert_eq!(missing("garbage"), excluded);
+        assert!(linux_missing_exclusions(&table, &[], gateway, "payphone0").is_empty());
+    }
+
+    #[test]
+    fn windows_route_table_matches_exact_prefix_only() {
+        let sample = "\
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.50     25
+      192.168.1.0    255.255.255.0         On-link     192.168.1.50    281
+Persistent Routes:
+  Network Address          Netmask  Gateway Address  Metric
+      203.0.113.7  255.255.255.255      192.168.1.1       1
+";
+        let has = |text: &str| windows_route_table_has(sample, text.parse().unwrap());
+        assert!(has("192.168.1.0/24"));
+        assert!(has("203.0.113.7"));
+        assert!(!has("192.168.0.0/16"));
+        assert!(!has("192.168.1.0/25"));
     }
 
     #[test]
